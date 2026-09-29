@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
-import OpenAI from "openai";
+import { GoogleGenAI } from "@google/genai";
 
 export interface InvoiceLineItem {
   productName: string | null;
@@ -25,14 +25,14 @@ export interface InvoiceData {
   uncertainFields: string[];
 }
 
-const openaiApiKey = process.env.OPENAI_API_KEY;
-const model = process.env.OPENAI_MODEL ?? "gpt-5.6-luna";
+const geminiApiKey = process.env.GEMINI_API_KEY;
+const model = process.env.GEMINI_MODEL ?? "gemini-2.5-flash-lite";
 
-if (!openaiApiKey) {
-  throw new Error("OPENAI_API_KEY is missing from .env");
+if (!geminiApiKey) {
+  throw new Error("GEMINI_API_KEY is missing from .env");
 }
 
-const openai = new OpenAI({ apiKey: openaiApiKey });
+const gemini = new GoogleGenAI({ apiKey: geminiApiKey });
 
 const invoiceSchema = {
   type: "object",
@@ -107,16 +107,13 @@ function mimeTypeFor(filePath: string): string {
 
 export async function extractInvoice(filePath: string): Promise<InvoiceData> {
   const image = await readFile(filePath);
-  const dataUrl = `data:${mimeTypeFor(filePath)};base64,${image.toString("base64")}`;
-
-  const response = await openai.responses.create({
+  const response = await gemini.models.generateContent({
     model,
-    input: [
+    contents: [
       {
         role: "user",
-        content: [
+        parts: [
           {
-            type: "input_text",
             text: [
               "Extract the purchase information from this TCGPlayer invoice image.",
               "Return only information that is actually visible in the invoice.",
@@ -129,26 +126,23 @@ export async function extractInvoice(filePath: string): Promise<InvoiceData> {
             ].join("\n"),
           },
           {
-            type: "input_image",
-            image_url: dataUrl,
-            detail: "high",
+            inlineData: {
+              mimeType: mimeTypeFor(filePath),
+              data: image.toString("base64"),
+            },
           },
         ],
       },
     ],
-    text: {
-      format: {
-        type: "json_schema",
-        name: "tcgplayer_invoice",
-        strict: true,
-        schema: invoiceSchema,
-      },
+    config: {
+      responseMimeType: "application/json",
+      responseSchema: invoiceSchema,
     },
   });
 
-  if (!response.output_text) {
-    throw new Error("OpenAI returned no structured invoice data.");
+  if (!response.text) {
+    throw new Error("Gemini returned no structured invoice data.");
   }
 
-  return JSON.parse(response.output_text) as InvoiceData;
+  return JSON.parse(response.text) as InvoiceData;
 }
