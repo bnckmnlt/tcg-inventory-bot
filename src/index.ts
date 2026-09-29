@@ -4,6 +4,7 @@ import {
   ButtonBuilder,
   ButtonStyle,
   Client,
+  EmbedBuilder,
   Events,
   GatewayIntentBits,
   Message,
@@ -35,52 +36,78 @@ function formatMoney(amount: number | null, currency: string | null): string {
   return `${currency ?? ""} ${amount.toFixed(2)}`.trim();
 }
 
-function buildReviewMessage(invoice: Awaited<ReturnType<typeof extractInvoice>>, transactionId: string): string {
-  const itemLines = invoice.lineItems.flatMap((item, index) => {
-    const details = [
-      `Set: ${item.setName ?? "Unknown"}`,
-      `No.: ${item.cardNumber ?? "Unknown"}`,
-      `Rarity: ${item.rarity ?? "Unknown"}`,
-      `Condition: ${item.condition ?? "Unknown"}`,
-      `Language: ${item.language ?? "Unknown"}`,
-      `Variant: ${item.variant ?? "Unknown"}`,
-    ];
+function buildReviewEmbeds(
+  invoice: Awaited<ReturnType<typeof extractInvoice>>,
+  transactionId: string,
+): EmbedBuilder[] {
+  const embeds: EmbedBuilder[] = [];
+  const transactionLabel = transactionId.slice(0, 8);
 
-    const pricing = [
-      `Qty: ${item.quantity ?? "?"}`,
-      `Unit: ${formatMoney(item.unitPrice, invoice.currency)}`,
-      `Total: ${formatMoney(item.totalPrice, invoice.currency)}`,
-    ];
+  const summary = new EmbedBuilder()
+    .setTitle("🔎 Invoice Review")
+    .setDescription("Check the extracted purchase data against the invoice before confirming.")
+    .addFields(
+      { name: "Seller", value: invoice.seller ?? "Unknown", inline: true },
+      { name: "Purchase Date", value: invoice.purchaseDate ?? "Unknown", inline: true },
+      { name: "Order ID", value: invoice.orderId ?? "Unknown", inline: true },
+      { name: "Subtotal", value: formatMoney(invoice.subtotal, invoice.currency), inline: true },
+      { name: "Shipping", value: formatMoney(invoice.shipping, invoice.currency), inline: true },
+      { name: "Tax", value: formatMoney(invoice.tax, invoice.currency), inline: true },
+      { name: "Total", value: formatMoney(invoice.total, invoice.currency), inline: true },
+    )
+    .setFooter({ text: `Transaction ${transactionLabel} • Pending confirmation` });
 
-    return [
-      `**${index + 1}. ${item.productName ?? "Unknown card"}**`,
-      details.join(" • "),
-      pricing.join(" • "),
-    ];
-  });
+  if (invoice.uncertainFields.length > 0) {
+    summary.addFields({
+      name: "⚠️ Needs Review",
+      value: invoice.uncertainFields.join(", ").slice(0, 1024),
+    });
+  }
 
-  const uncertainty = invoice.uncertainFields.length > 0
-    ? ["", `⚠️ **Needs review:** ${invoice.uncertainFields.join(", ")}`]
-    : [];
+  embeds.push(summary);
 
-  return [
-    "🔎 **Review invoice before saving**",
-    "",
-    `**Transaction ID:** ${transactionId.slice(0, 8)}`,
-    `**Seller:** ${invoice.seller ?? "Unknown"}`,
-    `**Purchase date:** ${invoice.purchaseDate ?? "Unknown"}`,
-    `**Order ID:** ${invoice.orderId ?? "Unknown"}`,
-    `**Subtotal:** ${formatMoney(invoice.subtotal, invoice.currency)}`,
-    `**Shipping:** ${formatMoney(invoice.shipping, invoice.currency)}`,
-    `**Tax:** ${formatMoney(invoice.tax, invoice.currency)}`,
-    `**Total:** ${formatMoney(invoice.total, invoice.currency)}`,
-    "",
-    "**Cards:**",
-    ...(itemLines.length > 0 ? itemLines : ["No line items found."]),
-    ...uncertainty,
-    "",
-    "Confirm only after checking the extracted fields against the invoice.",
-  ].join("\\n");
+  if (invoice.lineItems.length === 0) {
+    embeds.push(
+      new EmbedBuilder()
+        .setTitle("Cards")
+        .setDescription("No line items were found in the invoice.")
+        .setFooter({ text: `Transaction ${transactionLabel}` }),
+    );
+    return embeds;
+  }
+
+  for (let start = 0; start < invoice.lineItems.length; start += 4) {
+    const cardEmbed = new EmbedBuilder()
+      .setTitle(start === 0 ? "Cards" : "Cards — continued")
+      .setFooter({ text: `Transaction ${transactionLabel} • ${invoice.lineItems.length} line items` });
+
+    invoice.lineItems.slice(start, start + 4).forEach((item, offset) => {
+      const index = start + offset + 1;
+      const details = [
+        `Set: ${item.setName ?? "Unknown"}`,
+        `Card No.: ${item.cardNumber ?? "Unknown"}`,
+        `Rarity: ${item.rarity ?? "Unknown"}`,
+        `Condition: ${item.condition ?? "Unknown"}`,
+        `Language: ${item.language ?? "Unknown"}`,
+        `Variant: ${item.variant ?? "Unknown"}`,
+      ].join("\n");
+
+      const pricing = [
+        `Qty: ${item.quantity ?? "?"}`,
+        `Unit: ${formatMoney(item.unitPrice, invoice.currency)}`,
+        `Total: ${formatMoney(item.totalPrice, invoice.currency)}`,
+      ].join(" • ");
+
+      cardEmbed.addFields({
+        name: `${index}. ${item.productName ?? "Unknown card"}`,
+        value: `${details}\n${pricing}`,
+      });
+    });
+
+    embeds.push(cardEmbed);
+  }
+
+  return embeds;
 }
 
 function reviewButtons(transactionId: string) {
@@ -115,15 +142,21 @@ client.on(Events.MessageCreate, async (message: Message) => {
         "",
         "🔎 Extracting purchase data...",
         `**File:** ${attachment.name}`,
-      ].join("\\n"));
+      ].join("\n"));
 
       const invoice = await extractInvoice(filePath);
       const transaction = createPendingTransaction(invoice, message.id, [attachment.name ?? "invoice"]);
 
-      await message.reply({
-        content: buildReviewMessage(invoice, transaction.id),
-        components: [reviewButtons(transaction.id)],
-      });
+      const reviewEmbeds = buildReviewEmbeds(invoice, transaction.id);
+
+      for (let index = 0; index < reviewEmbeds.length; index += 10) {
+        const embedChunk = reviewEmbeds.slice(index, index + 10);
+        const isLastChunk = index + 10 >= reviewEmbeds.length;
+        await message.reply({
+          embeds: embedChunk,
+          components: isLastChunk ? [reviewButtons(transaction.id)] : [],
+        });
+      }
 
       console.log("Invoice extracted and awaiting confirmation:", transaction.id);
     } catch (error) {
@@ -166,7 +199,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         `Transaction ${transactionId.slice(0, 8)} is approved and ready for the Google Sheets integration.`,
         "",
         "Nothing has been written to Google Sheets yet.",
-      ].join("\\n"),
+      ].join("\n"),
       components: [],
     });
   }
