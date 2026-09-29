@@ -1,6 +1,7 @@
 import "dotenv/config";
 import { Client, Events, GatewayIntentBits, Message } from "discord.js";
 import { downloadInvoice } from "./invoice.js";
+import { extractInvoice } from "./extract.js";
 
 const token = process.env.DISCORD_TOKEN;
 const invoiceChannelId = process.env.INVOICE_CHANNEL_ID;
@@ -52,20 +53,49 @@ client.on(Events.MessageCreate, async (message: Message) => {
 
       await message.reply(
         [
-          "📥 Invoice received and saved!",
+          "📥 Invoice received and saved.",
           "",
+          "🔎 Extracting purchase data...",
           `**File:** ${attachment.name}`,
-          `**Saved:** ${filePath}`,
-          `**Size:** ${attachment.size.toLocaleString()} bytes`,
         ].join("\n"),
       );
 
-      console.log("Invoice saved:", filePath);
-    } catch (error) {
-      console.error("Failed to save invoice:", error);
+      const invoice = await extractInvoice(filePath);
+
+      const itemLines = invoice.lineItems.map((item, index) => {
+        const quantity = item.quantity ?? "?";
+        const price =
+          item.unitPrice !== null ? `$${item.unitPrice.toFixed(2)} each` : "price unknown";
+
+        return `${index + 1}. ${item.productName ?? "Unknown card"} — ${quantity} × ${price}`;
+      });
+
+      const uncertainty =
+        invoice.uncertainFields.length > 0
+          ? `\n⚠️ **Needs review:** ${invoice.uncertainFields.join(", ")}`
+          : "";
 
       await message.reply(
-        "I received the image, but I couldn't save it. Check the bot logs for details.",
+        [
+          "✅ **Invoice extracted**",
+          "",
+          `**Seller:** ${invoice.seller ?? "Unknown"}`,
+          `**Purchase date:** ${invoice.purchaseDate ?? "Unknown"}`,
+          `**Order ID:** ${invoice.orderId ?? "Unknown"}`,
+          `**Total:** ${invoice.total !== null ? `${invoice.currency ?? ""} ${invoice.total.toFixed(2)}`.trim() : "Unknown"}`,
+          "",
+          "**Cards:**",
+          ...(itemLines.length > 0 ? itemLines : ["No line items found."]),
+          uncertainty,
+        ].filter(Boolean).join("\n"),
+      );
+
+      console.log("Invoice extracted:", invoice);
+    } catch (error) {
+      console.error("Failed to process invoice:", error);
+
+      await message.reply(
+        "I received the image, but I couldn't process it. Check the bot logs for details.",
       );
     }
   }
