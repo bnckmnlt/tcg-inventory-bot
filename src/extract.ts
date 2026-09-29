@@ -7,6 +7,9 @@ export interface InvoiceLineItem {
   setName: string | null;
   cardNumber: string | null;
   condition: string | null;
+  rarity: string | null;
+  language: string | null;
+  variant: string | null;
   quantity: number | null;
   unitPrice: number | null;
   totalPrice: number | null;
@@ -56,6 +59,9 @@ const invoiceSchema = {
           setName: { type: ["string", "null"] },
           cardNumber: { type: ["string", "null"] },
           condition: { type: ["string", "null"] },
+          rarity: { type: ["string", "null"] },
+          language: { type: ["string", "null"] },
+          variant: { type: ["string", "null"] },
           quantity: { type: ["number", "null"] },
           unitPrice: { type: ["number", "null"] },
           totalPrice: { type: ["number", "null"] },
@@ -65,6 +71,9 @@ const invoiceSchema = {
           "setName",
           "cardNumber",
           "condition",
+          "rarity",
+          "language",
+          "variant",
           "quantity",
           "unitPrice",
           "totalPrice",
@@ -122,7 +131,9 @@ export async function extractInvoice(filePath: string): Promise<InvoiceData> {
               "Use the invoice's currency code when visible; otherwise use null.",
               "Use an ISO date (YYYY-MM-DD) when the purchase date is clear.",
               "For each purchased card, preserve the exact product name shown.",
-              "If a field is difficult to read or ambiguous, add its field name to uncertainFields.",
+              "Extract the set name, card number, rarity, condition, language, and printing/variant when visible.",
+              "For variant, capture things such as 1st Edition, Unlimited, Holo, Reverse Holo, Foil, Promo, etc. when explicitly shown.",
+              "If a field is difficult to read or ambiguous, add its field name to uncertainFields."
             ].join("\n"),
           },
           {
