@@ -66,7 +66,7 @@ function buildReviewEmbeds(
       [
         statusLabel(plan),
         "",
-        "The bot will only store rows with an exact catalog SKU. Unresolved rows are never written.",
+        "Verified rows can be stored now. Unresolved rows remain pending and are never written until resolved.",
       ].join("\n"),
     )
     .addFields(
@@ -271,7 +271,7 @@ client.on(Events.MessageCreate, async (message: Message) => {
         await message.reply({
           embeds: embedChunk,
           components: isLastChunk
-            ? [reviewButtons(transaction.id, resolved.plan.pendingReview === 0 && resolved.plan.insertable > 0)]
+            ? [reviewButtons(transaction.id, resolved.plan.insertable > 0)]
             : [],
         });
       }
@@ -309,13 +309,13 @@ client.on(Events.InteractionCreate, async (interaction) => {
   }
 
   if (action === "confirm") {
-    if (transaction.plan.pendingReview > 0 || transaction.plan.insertable === 0) {
+    if (transaction.plan.insertable === 0) {
       await interaction.reply({
         content: [
-          "The invoice cannot be stored yet.",
+          "There are no verified rows to store yet.",
           `Insertable: ${transaction.plan.insertable}`,
           `Pending review: ${transaction.plan.pendingReview}`,
-          "Resolve or reject the unresolved invoice rows first.",
+          "Resolve at least one pending row before confirming.",
         ].join("\n"),
         ephemeral: true,
       });
@@ -326,17 +326,23 @@ client.on(Events.InteractionCreate, async (interaction) => {
     await interaction.deferUpdate();
 
     try {
-      const applied = await inventoryStore.apply(transaction.plan.rows);
+      const insertableRows = transaction.plan.rows.filter((row) => row.action === "INSERT");
+      const currentInventoryStore = await createJsonInventoryStore(inventoryPath);
+      const applied = await currentInventoryStore.apply(insertableRows);
       removePendingTransaction(transactionId);
 
       await interaction.editReply({
         content: [
-          "✅ **Invoice confirmed and stored locally**",
+          "✅ **Verified inventory stored locally**",
           "",
           `Transaction ${transactionId.slice(0, 8)}`,
           `Inserted: ${applied.inserted}`,
           `Skipped: ${applied.skipped}`,
-          `Pending: ${applied.pendingReview}`,
+          `Pending review: ${transaction.plan.pendingReview}`,
+          "",
+          transaction.plan.pendingReview > 0
+            ? "Unresolved rows were not stored and require separate review."
+            : "All invoice rows were resolved and stored.",
           "",
           `Inventory file: ${inventoryPath}`,
           "Google Sheets persistence is intentionally not connected yet.",
@@ -346,7 +352,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     } catch (error) {
       console.error("Failed to store confirmed invoice:", error);
       await interaction.editReply({
-        content: "The invoice was approved, but local storage failed. The review remains pending so it can be retried.",
+        content: "The verified inventory rows were approved, but local storage failed. The review remains pending so it can be retried.",
         components: [reviewButtons(transactionId, true)],
       });
     }
