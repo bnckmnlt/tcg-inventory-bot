@@ -8,9 +8,13 @@ import {
   Events,
   GatewayIntentBits,
   Message,
+  ModalBuilder,
+  TextInputBuilder,
+  TextInputStyle,
 } from "discord.js";
 import path from "node:path";
 import { existsSync } from "node:fs";
+import { copyFile, writeFile } from "node:fs/promises";
 import { downloadInvoice } from "./invoice.js";
 import { extractInvoice } from "./extract.js";
 import { enrichCardInput, mergeCatalog } from "./catalog/enrichment.js";
@@ -32,10 +36,25 @@ if (!token) throw new Error("DISCORD_TOKEN is missing from .env");
 if (!invoiceChannelId) throw new Error("INVOICE_CHANNEL_ID is missing from .env");
 
 const catalogPath = path.resolve("data/catalog.json");
-const inventoryPath = path.resolve("data/inventory.json");
-const workbookPath = process.env.INVENTORY_WORKBOOK_PATH
+const invoiceTestMode = process.env.INVOICE_TEST_MODE === "true";
+const productionInventoryPath = path.resolve("data/inventory.json");
+const productionWorkbookPath = process.env.INVENTORY_WORKBOOK_PATH
   ? path.resolve(process.env.INVENTORY_WORKBOOK_PATH)
   : undefined;
+const inventoryPath = invoiceTestMode
+  ? path.resolve("/tmp/tcg-inventory-bot-test-inventory.json")
+  : productionInventoryPath;
+const workbookPath = invoiceTestMode
+  ? path.resolve("/tmp/tcg-inventory-bot-test-workbook.xlsx")
+  : productionWorkbookPath;
+
+if (invoiceTestMode) {
+  if (!productionWorkbookPath) {
+    throw new Error("INVOICE_TEST_MODE requires INVENTORY_WORKBOOK_PATH so the real workbook can be copied to a temporary test workbook.");
+  }
+  await copyFile(productionWorkbookPath, workbookPath!);
+  await writeFile(inventoryPath, "[]\n", "utf8");
+}
 
 const client = new Client({
   intents: [
@@ -129,18 +148,49 @@ function buildReviewEmbeds(
   return embeds;
 }
 
-function reviewButtons(transactionId: string, canConfirm: boolean) {
-  return new ActionRowBuilder<ButtonBuilder>().addComponents(
+function reviewButtons(transactionId: string, canConfirm: boolean, needsReview: boolean) {
+  const buttons = new ActionRowBuilder<ButtonBuilder>().addComponents(
     new ButtonBuilder()
       .setCustomId(`invoice:confirm:${transactionId}`)
       .setLabel(canConfirm ? "Confirm & Store" : "Confirm & Store (blocked)")
       .setStyle(ButtonStyle.Success)
       .setDisabled(!canConfirm),
+  );
+
+  if (needsReview) {
+    buttons.addComponents(
+      new ButtonBuilder()
+        .setCustomId(`invoice:review:${transactionId}`)
+        .setLabel("Resolve Review Issues")
+        .setStyle(ButtonStyle.Primary),
+    );
+  }
+
+  buttons.addComponents(
     new ButtonBuilder()
       .setCustomId(`invoice:reject:${transactionId}`)
       .setLabel("Reject")
       .setStyle(ButtonStyle.Danger),
   );
+
+  return buttons;
+}
+
+function buildCardNumberModal(transactionId: string, rowIndex: number, cardName: string, currentValue: string) {
+  const input = new TextInputBuilder()
+    .setCustomId("card-number")
+    .setLabel("Valid card number")
+    .setStyle(TextInputStyle.Short)
+    .setPlaceholder("Example: 006, 088, 176")
+    .setValue(currentValue === "1" ? "" : currentValue)
+    .setRequired(true)
+    .setMinLength(1)
+    .setMaxLength(12);
+
+  return new ModalBuilder()
+    .setCustomId(`invoice:card-number:${transactionId}:${rowIndex}`)
+    .setTitle(`Resolve: ${cardName.slice(0, 35)}`)
+    .addComponents(new ActionRowBuilder<TextInputBuilder>().addComponents(input));
 }
 
 async function loadCatalog(): Promise<Catalog> {
@@ -228,7 +278,11 @@ async function buildPlan(
       runtime,
     );
 
-    if (result.state === "ENRICHED" && result.catalog) {
+    // A unique runtime candidate is sufficient to establish the card's
+    // printing identity even when no local SKU can be created (for example,
+    // a known printing with an unsupported variant). Keep that catalog data
+    // so the second planning pass can fill the required Card Number safely.
+    if (result.catalog && result.externalCandidates.length === 1) {
       workingCatalog = mergeCatalog(workingCatalog, result.catalog);
       enriched = true;
     }
@@ -297,7 +351,7 @@ client.on(Events.MessageCreate, async (message: Message) => {
         await message.reply({
           embeds: embedChunk,
           components: isLastChunk
-            ? [reviewButtons(transaction.id, resolved.plan.insertable > 0)]
+            ? [reviewButtons(transaction.id, resolved.plan.insertable > 0 && !resolved.plan.rows.some((row) => row.input.reviewRequired), resolved.plan.rows.some((row) => row.input.reviewRequired))]
             : [],
         });
       }
@@ -311,6 +365,54 @@ client.on(Events.MessageCreate, async (message: Message) => {
 });
 
 client.on(Events.InteractionCreate, async (interaction) => {
+  if (interaction.isModalSubmit()) {
+    const [prefix, field, transactionId, rowIndexText] = interaction.customId.split(":");
+    if (prefix !== "invoice" || field !== "card-number" || !transactionId || rowIndexText === undefined) return;
+
+    const transaction = getPendingTransaction(transactionId);
+    if (!transaction) {
+      await interaction.reply({ content: "This invoice review has expired or was already handled.", ephemeral: true });
+      return;
+    }
+
+    const rowIndex = Number(rowIndexText);
+    const row = transaction.plan.rows[rowIndex];
+    const value = interaction.fields.getTextInputValue("card-number").trim().replace(/^#/, "");
+    if (!row || !/^\\d+(?:\\.\\d+)?$/.test(value) || value === "0") {
+      await interaction.reply({ content: "Enter a valid positive card number, such as 006, 088, or 176.", ephemeral: true });
+      return;
+    }
+
+    row.input.cardNumber = value;
+    row.input.reviewFlags = (row.input.reviewFlags ?? []).filter((flag) => flag !== "CARD_NUMBER_UNCERTAIN");
+    row.input.reviewRequired = (row.input.reviewFlags ?? []).length > 0;
+    row.input.reviewNotes = (row.input.reviewNotes ?? []).filter((note) => !note.includes('temporary value "1" was used'));
+    row.input.resolutionReasons = [
+      ...(row.input.resolutionReasons ?? []),
+      `Card number manually confirmed in Discord review: ${value}.`,
+    ];
+
+    const remaining = transaction.plan.rows.filter((candidate) => candidate.input.reviewRequired);
+    await interaction.reply({
+      content: remaining.length === 0
+        ? `✅ **${row.input.cardName || "Card"}** updated to card number **${value}**. All review issues are resolved; the invoice is ready to store.`
+        : `✅ **${row.input.cardName || "Card"}** updated to card number **${value}**. ${remaining.length} review issue(s) remain; use **Resolve Review Issues** again.`,
+      ephemeral: true,
+    });
+
+    if (interaction.message) {
+      await interaction.message.edit({
+        embeds: buildReviewEmbeds(transaction.invoice, transaction.plan, transaction.id),
+        components: [reviewButtons(
+          transaction.id,
+          transaction.plan.insertable > 0 && remaining.length === 0,
+          remaining.length > 0,
+        )],
+      });
+    }
+    return;
+  }
+
   if (!interaction.isButton()) return;
 
   const [prefix, action, transactionId] = interaction.customId.split(":");
@@ -322,6 +424,27 @@ client.on(Events.InteractionCreate, async (interaction) => {
       content: "This invoice review has expired or was already handled.",
       ephemeral: true,
     });
+    return;
+  }
+
+  if (action === "review") {
+    const flagged = transaction.plan.rows.findIndex((row) => row.input.reviewRequired);
+    if (flagged < 0) {
+      await interaction.reply({ content: "No review issues remain.", ephemeral: true });
+      return;
+    }
+
+    const row = transaction.plan.rows[flagged];
+    const cardNumberFlagged = (row.input.reviewFlags ?? []).includes("CARD_NUMBER_UNCERTAIN");
+    if (!cardNumberFlagged) {
+      await interaction.reply({
+        content: `The remaining issue for **${row.input.cardName || "this card"}** is ${(row.input.reviewFlags ?? []).join(", ")}. Manual card-number correction is currently supported for CARD_NUMBER_UNCERTAIN.`,
+        ephemeral: true,
+      });
+      return;
+    }
+
+    await interaction.showModal(buildCardNumberModal(transactionId, flagged, row.input.cardName || "Card", row.input.cardNumber || "1"));
     return;
   }
 
@@ -381,7 +504,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
       console.error("Failed to store confirmed invoice:", error);
       await interaction.editReply({
         content: "The verified inventory rows were approved, but local storage failed. The review remains pending so it can be retried.",
-        components: [reviewButtons(transactionId, true)],
+        components: [reviewButtons(
+          transactionId,
+          transaction.plan.insertable > 0 && !transaction.plan.rows.some((row) => row.input.reviewRequired),
+          transaction.plan.rows.some((row) => row.input.reviewRequired),
+        )],
       });
     }
   }
