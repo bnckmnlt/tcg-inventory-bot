@@ -591,11 +591,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         // review UI can transition from "Review Now" to "Confirm & Store".
         await interaction.webhook.editMessage(interaction.message.id, {
           embeds: buildReviewEmbeds(transaction.invoice, transaction.plan, transaction.id),
-          components: [reviewButtons(
-            transaction.id,
-            transaction.plan.insertable > 0 && remaining.length === 0,
-            remaining.length > 0,
-          )],
+          components: [],
         });
       } catch (error) {
         // The transaction is already persisted, so a failed visual refresh
@@ -639,9 +635,16 @@ client.on(Events.InteractionCreate, async (interaction) => {
     const cardNumberFlagged = (row.input.reviewFlags ?? []).includes("CARD_NUMBER_UNCERTAIN");
     if (!cardNumberFlagged) {
       await interaction.reply({
-        content: `The remaining issue for **${row.input.cardName || "this card"}** is ${(row.input.reviewFlags ?? []).join(", ")}. Manual card-number correction is currently supported for CARD_NUMBER_UNCERTAIN.`,
+        content: `The remaining issue for **${row.input.cardName || "this card"}** is ${(row.input.reviewFlags ?? []).join(", ")}. Manual card-number correction is currently supported for CARD_NUMBER_UNCERTAIN. Use **/review** to reopen the pending invoice.`,
         ephemeral: true,
       });
+      if (interaction.message) {
+        try {
+          await interaction.webhook.editMessage(interaction.message.id, { components: [] });
+        } catch (error) {
+          console.warn("Could not remove the review action buttons:", error);
+        }
+      }
       return;
     }
 
