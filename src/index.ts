@@ -489,14 +489,22 @@ client.on(Events.InteractionCreate, async (interaction) => {
     });
 
     if (interaction.message) {
-      await interaction.message.edit({
-        embeds: buildReviewEmbeds(transaction.invoice, transaction.plan, transaction.id),
-        components: [reviewButtons(
-          transaction.id,
-          transaction.plan.insertable > 0 && remaining.length === 0,
-          remaining.length > 0,
-        )],
-      });
+      try {
+        await interaction.message.edit({
+          embeds: buildReviewEmbeds(transaction.invoice, transaction.plan, transaction.id),
+          components: [reviewButtons(
+            transaction.id,
+            transaction.plan.insertable > 0 && remaining.length === 0,
+            remaining.length > 0,
+          )],
+        });
+      } catch (error) {
+        // /review uses an ephemeral message, which Discord may not allow us to
+        // edit through the channel message manager after a modal submission.
+        // The transaction is already persisted, so a failed visual refresh
+        // must not turn into an unhandled client error or crash the bot.
+        console.warn("Could not refresh the ephemeral review message:", error);
+      }
     }
     return;
   }
