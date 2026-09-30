@@ -48,6 +48,7 @@ function formatMoney(amount: number | null, currency: string | null): string {
 function statusLabel(plan: IngestionPlan): string {
   if (plan.pendingReview > 0) return "⚠️ Manual review required";
   if (plan.insertable > 0) return "✅ Ready to store";
+  if (plan.skipped > 0) return "ℹ️ Already stored";
   return "ℹ️ Nothing to store";
 }
 
@@ -108,7 +109,8 @@ function buildReviewEmbeds(
 
       cardEmbed.addFields({
         name: `${index}. ${row.input.cardName || "Unknown card"} — ${row.action}`,
-        value: `${details}\nReason: ${row.reasons.join(" ").slice(0, 700)}`,
+        value: `${details}\n\nReason: ${row.reasons.join(" ").slice(0, 700)}`,
+        inline: false,
       });
     });
 
@@ -219,6 +221,31 @@ client.on(Events.MessageCreate, async (message: Message) => {
       await message.reply(`📥 Invoice received. Extracting and resolving **${attachment.name ?? "invoice"}**...`);
 
       const invoice = await extractInvoice(filePath);
+
+      // Order IDs are the stable invoice-level idempotency key. This catches the
+      // same invoice being uploaded again as a new Discord message/attachment.
+      if (invoice.orderId) {
+        const existing = inventoryStore.list().filter((row) =>
+          row.orderId === invoice.orderId &&
+          (!invoice.seller || row.seller === invoice.seller),
+        );
+
+        if (existing.length > 0) {
+          await message.reply({
+            content: [
+              "ℹ️ **Invoice already stored**",
+              "",
+              `Order ID: ${invoice.orderId}`,
+              `Seller: ${invoice.seller ?? existing[0].seller ?? "Unknown"}`,
+              `Existing inventory records: ${existing.length}`,
+              "",
+              "Nothing was added to inventory.",
+            ].join("\n"),
+          });
+          continue;
+        }
+      }
+
       const catalog = await loadCatalog();
       const sourceMessageId = `DISCORD-${message.id}-${attachment.id}`;
       const resolved = await buildPlan(invoice, sourceMessageId, catalog);
