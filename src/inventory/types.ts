@@ -16,6 +16,9 @@ export interface V2InventoryRow {
   purchaseDate?: string;
   seller?: string;
   orderId?: string;
+  skuId?: string;
+  resolutionState?: MatchState;
+  resolutionReasons?: string[];
 }
 
 export interface ResolvedInventoryLot {

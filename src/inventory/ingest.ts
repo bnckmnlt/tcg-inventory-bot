@@ -51,9 +51,9 @@ function lineToInventoryInput(line: InvoiceLineItem, inventoryId: string, invoic
 /**
  * Plans image/invoice records against a local catalog without writing anything.
  *
- * EXACT records are safe to insert. INCOMPLETE/AMBIGUOUS/CONFLICT/UNMATCHED
- * records are held for review. No SKU is inferred when the resolver cannot
- * prove an exact match.
+ * Every valid invoice purchase is recorded. Resolver state and SKU are enrichment
+ * metadata only; they never cause a legitimate purchased line to be discarded.
+ * No SKU is inferred when the resolver cannot prove an exact match.
  */
 export function planInvoiceIngestion(
   catalog: Catalog,
@@ -70,7 +70,7 @@ export function planInvoiceIngestion(
     const inventoryId = `IMG-${sourceMessageId}-${String(sourceLine).padStart(3, "0")}`;
     const input = lineToInventoryInput(line, inventoryId, invoice);
 
-    if (!line.productName || !line.setName || (!options.allowMissingCardNumber && !line.cardNumber) || !line.condition || !line.quantity || line.quantity < 1) {
+    if (!line.productName || !line.setName || (!options.allowMissingCardNumber && !line.cardNumber) || !line.quantity || line.quantity < 1) {
       rows.push({
         ingestionKey,
         sourceMessageId,
@@ -78,7 +78,7 @@ export function planInvoiceIngestion(
         action: "PENDING_REVIEW",
         state: "INCOMPLETE",
         input,
-        reasons: ["Required image-parsed inventory fields are missing or invalid."],
+        reasons: ["The invoice line is missing the minimum purchase fields needed to create an inventory lot."],
       });
       return;
     }
@@ -105,30 +105,23 @@ export function planInvoiceIngestion(
       condition: input.condition,
     }, { allowMissingCardNumber: options.allowMissingCardNumber });
 
-    if (resolved.state === "EXACT" && resolved.sku) {
-      rows.push({
-        ingestionKey,
-        sourceMessageId,
-        sourceLine,
-        action: "INSERT",
-        state: "EXACT",
-        inventoryId,
-        input,
-        skuId: resolved.sku.skuId,
-        reasons: ["Exact catalog SKU verified; record is safe for local insertion."],
-      });
-      return;
-    }
+    const skuId = resolved.sku?.skuId;
+    input.skuId = skuId;
+    input.resolutionState = resolved.state;
+    input.resolutionReasons = resolved.reasons;
 
     rows.push({
       ingestionKey,
       sourceMessageId,
       sourceLine,
-      action: "PENDING_REVIEW",
+      action: "INSERT",
       state: resolved.state,
       inventoryId,
       input,
-      reasons: resolved.reasons,
+      skuId,
+      reasons: skuId
+        ? ["Exact catalog SKU verified; purchase record is ready to store."]
+        : ["Purchase is recorded even though the catalog SKU is unresolved.", ...resolved.reasons],
     });
   });
 

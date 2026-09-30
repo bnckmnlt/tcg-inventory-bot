@@ -47,7 +47,7 @@ let plan = planInvoiceIngestion(
   { allowMissingCardNumber: true },
 );
 
-for (const row of plan.rows.filter((candidate) => candidate.action === "PENDING_REVIEW" && candidate.state === "UNMATCHED")) {
+for (const row of plan.rows.filter((candidate) => candidate.action === "INSERT" && candidate.state === "UNMATCHED")) {
   const result = await enrichCardInput(workingCatalog, {
     name: row.input.cardName,
     setName: row.input.setSeries,

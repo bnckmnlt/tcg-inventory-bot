@@ -66,7 +66,7 @@ function buildReviewEmbeds(
       [
         statusLabel(plan),
         "",
-        "Verified rows can be stored now. Unresolved rows remain pending and are never written until resolved.",
+        "Every valid purchased line is stored. SKU and catalog resolution are recorded separately and can be completed later.",
       ].join("\n"),
     )
     .addFields(
@@ -77,7 +77,7 @@ function buildReviewEmbeds(
       { name: "Shipping", value: formatMoney(invoice.shipping, invoice.currency), inline: true },
       { name: "Tax", value: formatMoney(invoice.tax, invoice.currency), inline: true },
       { name: "Total", value: formatMoney(invoice.total, invoice.currency), inline: true },
-      { name: "Decision", value: `Insertable: ${plan.insertable} • Pending: ${plan.pendingReview} • Skipped: ${plan.skipped}`, inline: true },
+      { name: "Decision", value: `To record: ${plan.insertable} • Needs data review: ${plan.pendingReview} • Skipped: ${plan.skipped}`, inline: true },
     )
     .setFooter({ text: `Transaction ${transactionLabel} • Pending confirmation` });
 
@@ -104,7 +104,7 @@ function buildReviewEmbeds(
         `Variant: ${row.input.variantPrinting || "Unknown"}`,
         `Qty: ${row.input.qtyPurchased ?? "?"}`,
         `Unit: ${formatMoney(row.input.unitCost ?? null, invoice.currency)}`,
-        `SKU: ${row.skuId ?? "NOT VERIFIED"}`,
+        `SKU: ${row.skuId ?? "UNRESOLVED (purchase still recorded)"}`,
       ].join("\n");
 
       cardEmbed.addFields({
@@ -163,7 +163,7 @@ async function buildPlan(
   let enriched = false;
 
   for (const row of plan.rows.filter(
-    (candidate) => candidate.action === "PENDING_REVIEW" && candidate.state === "UNMATCHED",
+    (candidate) => candidate.action === "INSERT" && candidate.state === "UNMATCHED",
   )) {
     const result = await enrichCardInput(
       workingCatalog,
@@ -312,10 +312,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
     if (transaction.plan.insertable === 0) {
       await interaction.reply({
         content: [
-          "There are no verified rows to store yet.",
-          `Insertable: ${transaction.plan.insertable}`,
-          `Pending review: ${transaction.plan.pendingReview}`,
-          "Resolve at least one pending row before confirming.",
+          "There are no valid invoice lines to store.",
+          `To record: ${transaction.plan.insertable}`,
+          `Needs data review: ${transaction.plan.pendingReview}`,
+          "The invoice needs to be re-extracted or corrected before it can be recorded.",
         ].join("\n"),
         ephemeral: true,
       });
@@ -341,8 +341,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
           `Pending review: ${transaction.plan.pendingReview}`,
           "",
           transaction.plan.pendingReview > 0
-            ? "Unresolved rows were not stored and require separate review."
-            : "All invoice rows were resolved and stored.",
+            ? "All valid purchases were recorded. Rows needing extraction/data review remain outside inventory until corrected."
+            : "All invoice rows were recorded.",
           "",
           `Inventory file: ${inventoryPath}`,
           "Google Sheets persistence is intentionally not connected yet.",

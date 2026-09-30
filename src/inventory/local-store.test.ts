@@ -51,8 +51,8 @@ test("applies only verified INSERT rows to the local store", () => {
   const store = new InMemoryInventoryStore();
   const applied = applyInsertionPlan(store, plan.rows);
 
-  assert.deepEqual(applied, { inserted: 1, skipped: 0, pendingReview: 1 });
-  assert.equal(store.list().length, 1);
+  assert.deepEqual(applied, { inserted: 2, skipped: 0, pendingReview: 0 });
+  assert.equal(store.list().length, 2);
   assert.equal(store.list()[0].cardName, "Charizard ex");
 });
 
@@ -84,7 +84,7 @@ test("reapplying the same plan is idempotent", () => {
   assert.equal(store.list().length, 1);
 });
 
-test("never writes pending-review records", () => {
+test("records purchases even when SKU resolution is incomplete", () => {
   const plan = planInvoiceIngestion(sampleCatalog, invoice([{
     productName: "Pikachu",
     setName: "Trick or Trade BOOster Bundle 2023",
@@ -101,7 +101,8 @@ test("never writes pending-review records", () => {
   const store = new InMemoryInventoryStore();
   const applied = applyInsertionPlan(store, plan.rows);
 
-  assert.equal(applied.inserted, 0);
-  assert.equal(applied.pendingReview, 1);
-  assert.equal(store.list().length, 0);
+  assert.equal(applied.inserted, 1);
+  assert.equal(applied.pendingReview, 0);
+  assert.equal(store.list().length, 1);
+  assert.equal(store.list()[0].skuId, undefined);
 });

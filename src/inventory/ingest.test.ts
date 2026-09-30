@@ -60,7 +60,7 @@ test("holds incomplete parsed data for review", () => {
   assert.equal(plan.rows[0].state, "INCOMPLETE");
 });
 
-test("holds a stable identity with no SKU instead of inventing one", () => {
+test("records a stable purchase even when no SKU exists", () => {
   const plan = planInvoiceIngestion(sampleCatalog, invoice([{
     productName: "Articuno",
     setName: "Trading Card Game Classic",
@@ -74,13 +74,15 @@ test("holds a stable identity with no SKU instead of inventing one", () => {
     totalPrice: 10,
   }]), "msg-003");
 
-  assert.equal(plan.insertable, 0);
-  assert.equal(plan.pendingReview, 1);
+  assert.equal(plan.insertable, 1);
+  assert.equal(plan.pendingReview, 0);
+  assert.equal(plan.rows[0].action, "INSERT");
   assert.equal(plan.rows[0].state, "INCOMPLETE");
   assert.equal(plan.rows[0].skuId, undefined);
+  assert.equal(plan.rows[0].input.skuId, undefined);
 });
 
-test("holds ambiguous or conflicting resolver results for review", () => {
+test("records ambiguous or conflicting purchases without inventing a SKU", () => {
   const plan = planInvoiceIngestion(sampleCatalog, invoice([{
     productName: "Drifblim",
     setName: "Example Set C",
@@ -94,10 +96,34 @@ test("holds ambiguous or conflicting resolver results for review", () => {
     totalPrice: 10,
   }]), "msg-004");
 
-  assert.equal(plan.insertable, 0);
-  assert.equal(plan.pendingReview, 1);
-  assert.equal(plan.rows[0].action, "PENDING_REVIEW");
+  assert.equal(plan.insertable, 1);
+  assert.equal(plan.pendingReview, 0);
+  assert.equal(plan.rows[0].action, "INSERT");
   assert.equal(plan.rows[0].state, "CONFLICT");
+  assert.equal(plan.rows[0].skuId, undefined);
+});
+
+test("records Dunsparce as a purchase even when catalog identity is unresolved", () => {
+  const plan = planInvoiceIngestion(sampleCatalog, invoice([{
+    productName: "Dunsparce",
+    setName: "SWSH Crown Zenith: Galarian Gallery",
+    cardNumber: null,
+    condition: "Near Mint",
+    rarity: "Holo Rare",
+    language: "English",
+    variant: "Holo",
+    quantity: 1,
+    unitPrice: 2.5,
+    totalPrice: 2.5,
+  }]), "msg-dunsparce", new Set(), { allowMissingCardNumber: true });
+
+  assert.equal(plan.insertable, 1);
+  assert.equal(plan.pendingReview, 0);
+  assert.equal(plan.rows[0].action, "INSERT");
+  assert.equal(plan.rows[0].input.cardName, "Dunsparce");
+  assert.equal(plan.rows[0].input.qtyPurchased, 1);
+  assert.equal(plan.rows[0].input.unitCost, 2.5);
+  assert.equal(plan.rows[0].input.skuId, undefined);
 });
 
 test("makes retries idempotent when the generated inventory ID already exists", () => {
