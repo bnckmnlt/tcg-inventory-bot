@@ -149,20 +149,26 @@ function buildReviewEmbeds(
 }
 
 function reviewButtons(transactionId: string, canConfirm: boolean, needsReview: boolean) {
-  const buttons = new ActionRowBuilder<ButtonBuilder>().addComponents(
-    new ButtonBuilder()
-      .setCustomId(`invoice:confirm:${transactionId}`)
-      .setLabel(canConfirm ? "Confirm & Store" : "Confirm & Store (blocked)")
-      .setStyle(ButtonStyle.Success)
-      .setDisabled(!canConfirm),
-  );
+  const buttons = new ActionRowBuilder<ButtonBuilder>();
 
   if (needsReview) {
     buttons.addComponents(
       new ButtonBuilder()
         .setCustomId(`invoice:review:${transactionId}`)
-        .setLabel("Resolve Review Issues")
+        .setLabel("Review Now")
         .setStyle(ButtonStyle.Primary),
+      new ButtonBuilder()
+        .setCustomId(`invoice:later:${transactionId}`)
+        .setLabel("Review Later")
+        .setStyle(ButtonStyle.Secondary),
+    );
+  } else {
+    buttons.addComponents(
+      new ButtonBuilder()
+        .setCustomId(`invoice:confirm:${transactionId}`)
+        .setLabel(canConfirm ? "Confirm & Store" : "Confirm & Store (blocked)")
+        .setStyle(ButtonStyle.Success)
+        .setDisabled(!canConfirm),
     );
   }
 
@@ -422,6 +428,14 @@ client.on(Events.InteractionCreate, async (interaction) => {
   if (!transaction) {
     await interaction.reply({
       content: "This invoice review has expired or was already handled.",
+      ephemeral: true,
+    });
+    return;
+  }
+
+  if (action === "later") {
+    await interaction.reply({
+      content: "Review deferred. This invoice remains pending and has not been stored. You can use **Review Now** on this message when you're ready.",
       ephemeral: true,
     });
     return;
