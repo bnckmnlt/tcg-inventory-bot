@@ -3,6 +3,11 @@ import test from "node:test";
 import { sampleCatalog } from "./sample.js";
 import type { Catalog } from "./types.js";
 import { resolveCardInput } from "./resolver.js";
+import { normalizeText } from "./normalize.js";
+
+test("normalizes common HTML entities in invoice names", () => {
+  assert.equal(normalizeText("Wally&apos;s Compass &amp; Ethan&#39;s Adventure"), "wally's compass & ethan's adventure");
+});
 
 test("resolves Charizard ex 151 #006 deterministically", () => {
   const result = resolveCardInput(sampleCatalog, {

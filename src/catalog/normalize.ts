@@ -1,5 +1,13 @@
+function decodeCommonHtmlEntities(value: string): string {
+  return value
+    .replace(/&apos;|&#39;|&#x27;/gi, "'")
+    .replace(/&quot;|&#34;|&#x22;/gi, '"')
+    .replace(/&amp;|&#38;|&#x26;/gi, "&")
+    .replace(/&nbsp;|&#160;|&#xA0;/gi, " ");
+}
+
 export function normalizeText(value: string | undefined): string {
-  return (value ?? "")
+  return decodeCommonHtmlEntities(value ?? "")
     .normalize("NFKD")
     .replace(/[\u0300-\u036f]/g, "")
     .trim()
