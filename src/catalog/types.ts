@@ -2,6 +2,26 @@ export type MatchState = "EXACT" | "AMBIGUOUS" | "INCOMPLETE" | "CONFLICT" | "UN
 
 export type CatalogCategory = "Pokemon" | "Trainer" | "Energy" | "Other";
 
+export interface SetCatalog {
+  setId: string;
+  sourceSetId: string;
+  setCode: string;
+  setName: string;
+  series?: string;
+  releaseDate?: string;
+  officialCardCount?: number;
+  status: "active" | "inactive";
+}
+
+export interface ExternalIdMapping {
+  externalIdMapId: string;
+  entityType: "set" | "card" | "printing" | "variant" | "sku";
+  internalId: string;
+  source: string;
+  externalId: string;
+  status: "active" | "inactive";
+}
+
 export interface Card {
   catalogCardId: string;
   canonicalName: string;
@@ -45,10 +65,12 @@ export interface Sku {
 }
 
 export interface Catalog {
+  sets: SetCatalog[];
   cards: Card[];
   printings: Printing[];
   variants: Variant[];
   skus: Sku[];
+  externalIdMappings: ExternalIdMapping[];
 }
 
 export interface CardInput {

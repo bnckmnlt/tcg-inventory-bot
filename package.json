@@ -7,7 +7,8 @@
     "dev": "tsx src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js",
-    "test:catalog": "node --import tsx --test src/catalog/*.test.ts"
+    "test:catalog": "node --import tsx --test src/catalog/*.test.ts",
+    "catalog:import": "tsx src/catalog/import-tcgdex.ts"
   },
   "dependencies": {
     "@google/genai": "^2.24.0",

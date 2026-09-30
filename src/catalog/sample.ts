@@ -1,6 +1,13 @@
 import type { Catalog } from "./types.js";
 
 export const sampleCatalog: Catalog = {
+  sets: [
+    { setId: "set-151", sourceSetId: "sv03.5", setCode: "sv03.5", setName: "151", officialCardCount: 165, status: "active" },
+    { setId: "set-svp", sourceSetId: "svp", setCode: "svp", setName: "Scarlet & Violet Black Star Promos", status: "active" },
+    { setId: "set-a", sourceSetId: "set-a", setCode: "seta", setName: "Example Set A", status: "active" },
+    { setId: "set-b", sourceSetId: "set-b", setCode: "setb", setName: "Example Set B", status: "active" },
+    { setId: "set-c", sourceSetId: "set-c", setCode: "setc", setName: "Example Set C", status: "active" },
+  ],
   cards: [
     { catalogCardId: "card-charizard-ex", canonicalName: "Charizard ex", category: "Pokemon" },
     { catalogCardId: "card-pikachu", canonicalName: "Pikachu", category: "Pokemon", dexId: 25 },
@@ -37,4 +44,5 @@ export const sampleCatalog: Catalog = {
     { skuId: "sku-lucian-b-nm", variantId: "variant-lucian-b-normal", condition: "Near Mint", language: "English", status: "active" },
     { skuId: "sku-drifloon-nm", variantId: "variant-drifloon-normal", condition: "Near Mint", language: "English", status: "active" },
   ],
+  externalIdMappings: [],
 };
