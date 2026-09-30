@@ -183,20 +183,29 @@ function reviewButtons(transactionId: string, canConfirm: boolean, needsReview: 
   return buttons;
 }
 
-function buildCardNumberModal(transactionId: string, rowIndex: number, cardName: string, currentValue: string) {
+function buildCardNumberModal(
+  transactionId: string,
+  rowIndex: number,
+  cardName: string,
+  setName: string,
+  currentValue: string,
+) {
   const input = new TextInputBuilder()
     .setCustomId("card-number")
     .setLabel("Valid card number")
     .setStyle(TextInputStyle.Short)
     .setPlaceholder("Example: 006, 088, 176")
-    .setValue(currentValue === "1" ? "" : currentValue)
     .setRequired(true)
     .setMinLength(1)
     .setMaxLength(12);
 
+  if (currentValue !== "1") {
+    input.setValue(currentValue);
+  }
+
   return new ModalBuilder()
     .setCustomId(`invoice:card-number:${transactionId}:${rowIndex}`)
-    .setTitle(`Resolve: ${cardName.slice(0, 35)}`)
+    .setTitle(`Resolve: ${cardName} — ${setName}`.slice(0, 45))
     .addComponents(new ActionRowBuilder<TextInputBuilder>().addComponents(input));
 }
 
@@ -385,7 +394,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     const rowIndex = Number(rowIndexText);
     const row = transaction.plan.rows[rowIndex];
     const value = interaction.fields.getTextInputValue("card-number").trim().replace(/^#/, "");
-    if (!row || !/^\\d+(?:\\.\\d+)?$/.test(value) || value === "0") {
+    if (!row || !/^\d+$/.test(value) || Number(value) <= 0) {
       await interaction.reply({ content: "Enter a valid positive card number, such as 006, 088, or 176.", ephemeral: true });
       return;
     }
@@ -460,7 +469,13 @@ client.on(Events.InteractionCreate, async (interaction) => {
       return;
     }
 
-    await interaction.showModal(buildCardNumberModal(transactionId, flagged, row.input.cardName || "Card", row.input.cardNumber || "1"));
+    await interaction.showModal(buildCardNumberModal(
+      transactionId,
+      flagged,
+      row.input.cardName || "Card",
+      row.input.setSeries || "Unknown set",
+      row.input.cardNumber || "1",
+    ));
     return;
   }
 
