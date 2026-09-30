@@ -164,6 +164,14 @@ async function ensureHeaderRow(token: string, spreadsheetId: string, sheetName: 
   });
 }
 
+export async function readGoogleSheetInventoryIds(): Promise<Set<string>> {
+  const config = loadConfig();
+  const token = await getAccessToken(config.credentials);
+  const sheetName = await verifySheetName(token, config.spreadsheetId, config.sheetName);
+  const ids = await existingInventoryIds(token, config.spreadsheetId, sheetName);
+  return new Set([...ids].filter((id) => /^(?:INV-\d+|IMG-DISCORD-\d+-\d+-\d+)$/.test(id)));
+}
+
 async function existingInventoryIds(token: string, spreadsheetId: string, sheetName: string): Promise<Set<string>> {
   const url =
     `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(spreadsheetId)}/values/${range(sheetName, "A2:A")}`;

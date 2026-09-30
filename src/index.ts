@@ -17,6 +17,7 @@ import {
 import path from "node:path";
 import { existsSync } from "node:fs";
 import { copyFile, writeFile } from "node:fs/promises";
+import { createInventoryBackup } from "./inventory/backup.js";
 import { downloadInvoice } from "./invoice.js";
 import { extractInvoice } from "./extract.js";
 import { enrichCardInput, mergeCatalog } from "./catalog/enrichment.js";
@@ -24,8 +25,8 @@ import { TCGdexRuntime } from "./catalog/runtime.js";
 import type { Catalog } from "./catalog/types.js";
 import { planInvoiceIngestion, type IngestionPlan } from "./inventory/ingest.js";
 import { createJsonInventoryStore } from "./inventory/json-store.js";
-import { persistInvoicePlanToWorkbookSafely } from "./inventory/workbook-persistence.js";
-import { appendInventoryRowsToGoogleSheets } from "./inventory/google-sheets.js";
+import { invoicePlanToWorkbookRows, persistInvoicePlanToWorkbookSafely } from "./inventory/workbook-persistence.js";
+import { appendInventoryRowsDirectToGoogleSheets } from "./inventory/google-sheets.js";
 import {
   createPendingTransaction,
   getPendingTransaction,
@@ -289,20 +290,24 @@ async function persistWorkbookIfConfigured(
 }
 
 async function persistGoogleSheetsIfConfigured(
+  invoice: Awaited<ReturnType<typeof extractInvoice>>,
   plan: IngestionPlan,
 ): Promise<string | null> {
   if (process.env.GOOGLE_SHEETS_SYNC !== "true") return null;
   if (invoiceTestMode) return "Google Sheets sync skipped in INVOICE_TEST_MODE.";
-  if (!workbookPath) throw new Error("Google Sheets sync requires INVENTORY_WORKBOOK_PATH.");
+  const rate = workbookRateForInvoice(invoice);
+  if (rate === undefined) {
+    throw new Error("Google Sheets sync is configured, but WORKBOOK_USD_TO_PHP_RATE is missing; refusing to guess the FX rate.");
+  }
 
-  const inventoryIds = plan.rows
-    .filter((row) => row.action === "INSERT")
-    .map((row) => row.inventoryId)
-    .filter((id): id is string => Boolean(id));
+  const rows = invoicePlanToWorkbookRows(plan, invoice, {
+    unitCostRate: rate,
+    sourceCurrency: invoice.currency ?? undefined,
+  });
 
-  if (inventoryIds.length === 0) return "Google Sheets unchanged — no new inventory lines to insert.";
+  if (rows.length === 0) return "Google Sheets unchanged — no new inventory lines to insert.";
 
-  const result = await appendInventoryRowsToGoogleSheets(workbookPath, inventoryIds);
+  const result = await appendInventoryRowsDirectToGoogleSheets(rows);
   return `Google Sheets updated: ${result.inserted} inserted, ${result.skipped} already present.`;
 }
 
@@ -605,10 +610,19 @@ client.on(Events.InteractionCreate, async (interaction) => {
     await interaction.deferUpdate();
 
     try {
+      // Create a recoverable local snapshot before any production persistence.
+      // Test mode intentionally skips backups because its workbook is disposable.
+      if (!invoiceTestMode) {
+        await createInventoryBackup({
+          workbookPath,
+          inventoryPath,
+        });
+      }
+
       // Write the shared Google Sheet before the local workbook. If Sheets is
       // unavailable, the transaction stays pending and the workbook is not
       // partially committed ahead of the shared copy.
-      const sheetsStatus = await persistGoogleSheetsIfConfigured(transaction.plan);
+      const sheetsStatus = await persistGoogleSheetsIfConfigured(transaction.invoice, transaction.plan);
       const workbookStatus = await persistWorkbookIfConfigured(transaction.invoice, transaction.plan);
       const currentInventoryStore = await createJsonInventoryStore(inventoryPath);
       const applied = await currentInventoryStore.apply(transaction.plan.rows);
