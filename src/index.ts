@@ -290,11 +290,14 @@ client.on(Events.InteractionCreate, async (interaction) => {
       return;
     }
 
+    // Acknowledge the button before disk I/O so Discord does not time out the interaction.
+    await interaction.deferUpdate();
+
     try {
       const applied = await inventoryStore.apply(transaction.plan.rows);
       removePendingTransaction(transactionId);
 
-      await interaction.update({
+      await interaction.editReply({
         content: [
           "✅ **Invoice confirmed and stored locally**",
           "",
@@ -310,9 +313,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
       });
     } catch (error) {
       console.error("Failed to store confirmed invoice:", error);
-      await interaction.reply({
+      await interaction.editReply({
         content: "The invoice was approved, but local storage failed. The review remains pending so it can be retried.",
-        ephemeral: true,
+        components: [reviewButtons(transactionId, true)],
       });
     }
   }
