@@ -16,7 +16,7 @@ import {
 } from "discord.js";
 import path from "node:path";
 import { existsSync } from "node:fs";
-import { copyFile, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, writeFile } from "node:fs/promises";
 import { createInventoryBackup } from "./inventory/backup.js";
 import { downloadInvoice } from "./invoice.js";
 import { extractInvoice } from "./extract.js";
@@ -47,14 +47,16 @@ const productionInventoryPath = path.resolve("data/inventory.json");
 const productionWorkbookPath = process.env.INVENTORY_WORKBOOK_PATH
   ? path.resolve(process.env.INVENTORY_WORKBOOK_PATH)
   : undefined;
+const testRuntimePath = path.resolve(".test-runtime");
 const inventoryPath = invoiceTestMode
-  ? path.resolve("/tmp/tcg-inventory-bot-test-inventory.json")
+  ? path.join(testRuntimePath, "inventory.json")
   : productionInventoryPath;
 const workbookPath = invoiceTestMode
-  ? path.resolve("/tmp/tcg-inventory-bot-test-workbook.xlsx")
+  ? path.join(testRuntimePath, "workbook.xlsx")
   : productionWorkbookPath;
 
 if (invoiceTestMode) {
+  await mkdir(testRuntimePath, { recursive: true });
   if (!productionWorkbookPath) {
     throw new Error("INVOICE_TEST_MODE requires INVENTORY_WORKBOOK_PATH so the real workbook can be copied to a temporary test workbook.");
   }

@@ -16,7 +16,7 @@ export interface PendingTransaction {
 
 const pendingTransactions = new Map<string, PendingTransaction>();
 const pendingTransactionsPath = process.env.INVOICE_TEST_MODE === "true"
-  ? path.resolve("/tmp/tcg-inventory-bot-test-pending-transactions.json")
+  ? path.resolve(".test-runtime/pending-transactions.json")
   : path.resolve("data/pending-transactions.json");
 
 function savePendingTransactions(): void {

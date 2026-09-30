@@ -9,3 +9,4 @@ credentials/
 # Local runtime inventory state
 data/inventory.json
 data/backups/
+.test-runtime/
