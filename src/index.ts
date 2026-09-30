@@ -25,6 +25,7 @@ import type { Catalog } from "./catalog/types.js";
 import { planInvoiceIngestion, type IngestionPlan } from "./inventory/ingest.js";
 import { createJsonInventoryStore } from "./inventory/json-store.js";
 import { persistInvoicePlanToWorkbookSafely } from "./inventory/workbook-persistence.js";
+import { appendInventoryRowsToGoogleSheets } from "./inventory/google-sheets.js";
 import {
   createPendingTransaction,
   getPendingTransaction,
@@ -285,6 +286,24 @@ async function persistWorkbookIfConfigured(
     sourceCurrency: invoice.currency ?? undefined,
   });
   return `Workbook updated: ${result.inserted} inserted, ${result.skipped} skipped, ${result.pendingReview} pending.`;
+}
+
+async function persistGoogleSheetsIfConfigured(
+  plan: IngestionPlan,
+): Promise<string | null> {
+  if (process.env.GOOGLE_SHEETS_SYNC !== "true") return null;
+  if (invoiceTestMode) return "Google Sheets sync skipped in INVOICE_TEST_MODE.";
+  if (!workbookPath) throw new Error("Google Sheets sync requires INVENTORY_WORKBOOK_PATH.");
+
+  const inventoryIds = plan.rows
+    .filter((row) => row.action === "INSERT")
+    .map((row) => row.inventoryId)
+    .filter((id): id is string => Boolean(id));
+
+  if (inventoryIds.length === 0) return "Google Sheets unchanged — no new inventory lines to insert.";
+
+  const result = await appendInventoryRowsToGoogleSheets(workbookPath, inventoryIds);
+  return `Google Sheets updated: ${result.inserted} inserted, ${result.skipped} already present.`;
 }
 
 async function buildPlan(
@@ -586,6 +605,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
     await interaction.deferUpdate();
 
     try {
+      // Write the shared Google Sheet before the local workbook. If Sheets is
+      // unavailable, the transaction stays pending and the workbook is not
+      // partially committed ahead of the shared copy.
+      const sheetsStatus = await persistGoogleSheetsIfConfigured(transaction.plan);
       const workbookStatus = await persistWorkbookIfConfigured(transaction.invoice, transaction.plan);
       const currentInventoryStore = await createJsonInventoryStore(inventoryPath);
       const applied = await currentInventoryStore.apply(transaction.plan.rows);
@@ -607,7 +630,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           "",
           `Inventory JSON file: ${inventoryPath}`,
           workbookStatus ?? "Workbook persistence is not enabled; set INVENTORY_WORKBOOK_PATH to enable it.",
-          "Google Sheets persistence is intentionally not connected yet.",
+          sheetsStatus ?? "Google Sheets persistence is disabled; set GOOGLE_SHEETS_SYNC=true to enable it.",
         ].join("\n"),
         components: [],
       });
