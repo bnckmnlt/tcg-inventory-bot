@@ -490,7 +490,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
     if (interaction.message) {
       try {
-        await interaction.message.edit({
+        // The /review flow uses an ephemeral message. Edit it through the
+        // interaction webhook rather than the channel message manager so the
+        // review UI can transition from "Review Now" to "Confirm & Store".
+        await interaction.webhook.editMessage(interaction.message.id, {
           embeds: buildReviewEmbeds(transaction.invoice, transaction.plan, transaction.id),
           components: [reviewButtons(
             transaction.id,
@@ -499,8 +502,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
           )],
         });
       } catch (error) {
-        // /review uses an ephemeral message, which Discord may not allow us to
-        // edit through the channel message manager after a modal submission.
         // The transaction is already persisted, so a failed visual refresh
         // must not turn into an unhandled client error or crash the bot.
         console.warn("Could not refresh the ephemeral review message:", error);
