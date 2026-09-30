@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { createSign } from "node:crypto";
 import { readV2InventoryWorkbook } from "./read-xlsx.js";
 import { V2_INVENTORY_HEADERS, type ParsedV2InventoryRow } from "./v2-workbook.js";
+import type { V2InventoryRow } from "./types.js";
 
 const SHEETS_SCOPE = "https://www.googleapis.com/auth/spreadsheets";
 
@@ -106,6 +107,33 @@ async function sheetsRequest<T>(
   return await response.json() as T;
 }
 
+async function verifySheetName(token: string, spreadsheetId: string, configuredSheetName: string): Promise<string> {
+  const url = `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(spreadsheetId)}?fields=sheets.properties`;
+  const body = await sheetsRequest(token, url);
+  const sheets = ((body as { sheets?: Array<{ properties?: { sheetId?: number; title?: string } }> }).sheets ?? []);
+  const match = sheets.find((sheet) => sheet.properties?.title === configuredSheetName);
+  if (match?.properties?.title) return match.properties.title;
+  throw new Error(`Google Sheet tab "${configuredSheetName}" was not found. Available tabs: ${sheets.map((sheet) => sheet.properties?.title).filter(Boolean).join(", ") || "none"}`);
+}
+
+async function backupGoogleSheetTab(token: string, spreadsheetId: string, sheetName: string): Promise<string> {
+  const metadataUrl = `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(spreadsheetId)}?fields=sheets.properties`;
+  const metadata = await sheetsRequest<{ sheets?: Array<{ properties?: { sheetId?: number; title?: string } }> }>(token, metadataUrl);
+  const source = (metadata.sheets ?? []).find((sheet) => sheet.properties?.title === sheetName);
+  const sourceId = source?.properties?.sheetId;
+  if (sourceId === undefined) throw new Error(`Cannot back up Google Sheet tab "${sheetName}" because its tab ID was not found.`);
+
+  const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const backupTitle = `Backup ${sheetName} ${timestamp}`.slice(0, 100);
+  const url = `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(spreadsheetId)}:batchUpdate`;
+  await sheetsRequest(token, url, {
+    method: "POST",
+    body: JSON.stringify({ requests: [{ duplicateSheet: { sourceSheetId: sourceId, newSheetName: backupTitle } }] }),
+  });
+  return backupTitle;
+}
+
+
 function rawValue(row: ParsedV2InventoryRow, header: string): unknown {
   return row.raw[header] ?? row.raw[header.toLowerCase()] ?? "";
 }
@@ -119,7 +147,12 @@ function rowValues(row: ParsedV2InventoryRow): unknown[] {
 }
 
 function range(sheetName: string, a1: string): string {
-  return encodeURIComponent(`${sheetName}!${a1}`);
+  // Quote sheet names so spaces and other special characters are valid in A1 notation.
+  return encodeURIComponent(`'${sheetName.replace(/'/g, "''")}'!${a1}`);
+}
+
+function quotedSheetRange(sheetName: string, a1: string): string {
+  return `'${sheetName.replace(/'/g, "''")}'!${a1}`;
 }
 
 async function ensureHeaderRow(token: string, spreadsheetId: string, sheetName: string): Promise<void> {
@@ -127,7 +160,7 @@ async function ensureHeaderRow(token: string, spreadsheetId: string, sheetName: 
     `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(spreadsheetId)}/values/${range(sheetName, "A1:Y1")}?valueInputOption=USER_ENTERED`;
   await sheetsRequest(token, url, {
     method: "PUT",
-    body: JSON.stringify({ range: `${sheetName}!A1:Y1`, majorDimension: "ROWS", values: [V2_INVENTORY_HEADERS] }),
+    body: JSON.stringify({ range: quotedSheetRange(sheetName, "A1:Y1"), majorDimension: "ROWS", values: [V2_INVENTORY_HEADERS] }),
   });
 }
 
@@ -172,11 +205,13 @@ export async function syncWorkbookInventoryToGoogleSheets(workbookPath: string):
 
   const config = loadConfig();
   const token = await getAccessToken(config.credentials);
+  const sheetName = await verifySheetName(token, config.spreadsheetId, config.sheetName);
 
-  await ensureHeaderRow(token, config.spreadsheetId, config.sheetName);
-  const existing = await existingInventoryIds(token, config.spreadsheetId, config.sheetName);
+  const existing = await existingInventoryIds(token, config.spreadsheetId, sheetName);
   const pending = parsed.rows.filter((row) => !existing.has(row.inventoryId));
-  const inserted = await appendRows(token, config.spreadsheetId, config.sheetName, pending);
+  if (pending.length > 0) await backupGoogleSheetTab(token, config.spreadsheetId, sheetName);
+  await ensureHeaderRow(token, config.spreadsheetId, sheetName);
+  const inserted = await appendRows(token, config.spreadsheetId, sheetName, pending);
 
   return { inserted, skipped: parsed.rows.length - inserted };
 }
@@ -193,15 +228,72 @@ export async function appendInventoryRowsToGoogleSheets(
     throw new Error(`Workbook has parser issues; refusing to sync: ${parsed.issues.map((issue) => issue.message).join(" | ")}`);
   }
 
-  const wanted = new Set(inventoryIds);
-  const rows = parsed.rows.filter((row) => wanted.has(row.inventoryId));
+  return appendParsedInventoryRowsToGoogleSheets(parsed.rows.filter((row) => new Set(inventoryIds).has(row.inventoryId)));
+}
+
+function inventoryRowToParsed(row: V2InventoryRow): ParsedV2InventoryRow {
+  const raw: Record<string, unknown> = {
+    "Inventory ID": row.inventoryId,
+    "Card Key": "",
+    "Card Name": row.cardName,
+    "Set / Series": row.setSeries,
+    "Card Number": row.cardNumber,
+    "Rarity": row.rarity ?? "",
+    "Condition": row.condition,
+    "Language": row.language,
+    "Variant / Printing": row.variantPrinting || "Normal",
+    "Purchase Date": row.purchaseDate ?? "",
+    "Seller": row.seller ?? "",
+    "Order ID": row.orderId ?? "",
+    "Qty Purchased": row.qtyPurchased ?? 0,
+    "Unit Cost (₱ each)": row.unitCost ?? 0,
+    "Total Cost (₱)": row.totalCost ?? 0,
+    "Expected Sell Price (₱)": "",
+    "Avg. Actual Sell Price (₱)": "",
+    "Qty Sold": 0,
+    "Remaining Qty": row.remainingQty,
+    "Total Revenue (₱)": 0,
+    "Cost Sold (FIFO)": 0,
+    "Realized Profit / Loss (₱)": 0,
+    "Stock Status": "In Stock",
+    "Status Override": "",
+    "Notes": [
+      row.skuId ? "SKU: " + row.skuId : "SKU: unresolved",
+      row.resolutionState ? "Resolution: " + row.resolutionState : "",
+      row.reviewFlags?.length ? "Review flags: " + row.reviewFlags.join(", ") : "",
+      row.reviewNotes?.length ? "Review notes: " + row.reviewNotes.join(" | ") : "",
+      row.resolutionReasons?.length ? "Resolution notes: " + row.resolutionReasons.join(" | ") : "",
+    ].filter(Boolean).join(" "),
+  };
+  return {
+    ...row,
+    sourceRow: 0,
+    rawCardKey: "",
+    qtyPurchased: row.qtyPurchased ?? 0,
+    unitCost: row.unitCost ?? 0,
+    raw,
+  };
+}
+
+export async function appendParsedInventoryRowsToGoogleSheets(
+  rows: ParsedV2InventoryRow[],
+): Promise<{ inserted: number; skipped: number }> {
+  if (rows.length === 0) return { inserted: 0, skipped: 0 };
+
   const config = loadConfig();
   const token = await getAccessToken(config.credentials);
-
-  await ensureHeaderRow(token, config.spreadsheetId, config.sheetName);
-  const existing = await existingInventoryIds(token, config.spreadsheetId, config.sheetName);
+  const sheetName = await verifySheetName(token, config.spreadsheetId, config.sheetName);
+  const existing = await existingInventoryIds(token, config.spreadsheetId, sheetName);
   const pending = rows.filter((row) => !existing.has(row.inventoryId));
-  const inserted = await appendRows(token, config.spreadsheetId, config.sheetName, pending);
+  if (pending.length > 0) await backupGoogleSheetTab(token, config.spreadsheetId, sheetName);
+  await ensureHeaderRow(token, config.spreadsheetId, sheetName);
+  const inserted = await appendRows(token, config.spreadsheetId, sheetName, pending);
 
   return { inserted, skipped: rows.length - inserted };
+}
+
+export async function appendInventoryRowsDirectToGoogleSheets(
+  rows: V2InventoryRow[],
+): Promise<{ inserted: number; skipped: number }> {
+  return appendParsedInventoryRowsToGoogleSheets(rows.map(inventoryRowToParsed));
 }
