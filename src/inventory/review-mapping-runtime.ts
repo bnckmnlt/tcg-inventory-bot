@@ -1,4 +1,5 @@
 import { readV2InventoryWorkbook } from "./read-xlsx.js";
+import { resolveCardInput } from "../catalog/resolver.js";
 import { resolveInventoryRows } from "./resolver.js";
 import { TCGdexRuntime } from "../catalog/runtime.js";
 import type { CardInput } from "../catalog/types.js";
@@ -24,15 +25,19 @@ for (const row of localRows.filter((candidate) => candidate.state !== "EXACT")) 
   if (placeholder) delete input.cardNumber;
 
   const result = await runtime.resolve(placeholder ? input : { ...input, name: undefined });
+  const resolved = placeholder && result.candidates.length === 1
+    ? resolveCardInput(result.catalog, { ...row.input, cardNumber: result.candidates[0].cardNumber })
+    : resolveCardInput(result.catalog, row.input);
   rows.push({
     inventoryId: row.inventoryId,
-    state: placeholder ? row.state : result.candidates.length === 0 ? "UNMATCHED" : result.candidates.some((candidate) => candidate.cardName === row.input.name) ? row.state : "CONFLICT",
+    state: resolved.state,
     cardName: row.input.name,
     setSeries: row.input.setName,
     legacyCardNumber: row.input.cardNumber,
     variant: row.input.variant,
     condition: row.input.condition,
     remainingQty: row.remainingQty,
+    reasons: resolved.reasons,
     candidateCount: result.candidates.length,
     candidates: result.candidates.map((candidate) => ({
       cardNumber: candidate.cardNumber,

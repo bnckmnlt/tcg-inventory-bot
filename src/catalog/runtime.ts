@@ -1,4 +1,4 @@
-import { normalizeCardNumber, normalizeLanguage, normalizeSetName, normalizeText, normalizeVariant } from "./normalize.js";
+import { normalizeCardNumber, normalizeInventoryCardName, normalizeLanguage, normalizeSetName, normalizeText, normalizeVariant } from "./normalize.js";
 import type { Card, Catalog, ExternalIdMapping, Printing, SetCatalog, Sku, Variant, CardInput } from "./types.js";
 import { createHash } from "node:crypto";
 
@@ -56,7 +56,7 @@ function stableId(prefix: string, source: string): string {
 }
 
 function baseCardName(value: string): string {
-  return normalizeText(value).replace(/\s*\([^)]*\)\s*$/, "").trim();
+  return normalizeInventoryCardName(value);
 }
 
 function legacySetCode(value: string): string | undefined {
@@ -220,9 +220,11 @@ export class TCGdexRuntime {
       if (setName === "tcg classic") return ["clb", "clc", "clv"].includes(normalizeText(set.id));
       return normalizeSetName(set.name) === setName;
     });
+    const rawName = normalizeText(input.name ?? "");
     const name = baseCardName(input.name ?? "");
     const number = normalizeCardNumber(input.cardNumber);
     const hints = candidateVariantHints(input.variant ?? "");
+    const fullArtRequested = /\(full art\)\s*$/i.test(rawName);
 
     const candidates: RuntimeCandidate[] = [];
     for (const setBrief of sets) {
@@ -234,6 +236,7 @@ export class TCGdexRuntime {
       });
       for (const brief of matchingBriefs) {
         const card = await this.getCard(brief.id);
+        if (fullArtRequested && normalizeText(card.rarity) !== "ultra rare") continue;
         const detailedVariants = card.variants_detailed?.length ? card.variants_detailed : [{ type: "normal" }];
         const labels = detailedVariants.map((variant) => variant.stamp ? variant.type + " — " + variant.stamp : variant.type);
         const variantText = labels.map(normalizeVariant);
