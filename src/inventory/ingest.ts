@@ -25,6 +25,57 @@ export interface IngestionPlan {
   skipped: number;
 }
 
+type PurchaseIdentityFields = Pick<
+  V2InventoryRow,
+  | "orderId"
+  | "sourceLine"
+  | "seller"
+  | "purchaseDate"
+  | "cardName"
+  | "setSeries"
+  | "cardNumber"
+  | "condition"
+  | "language"
+  | "variantPrinting"
+  | "qtyPurchased"
+  | "unitCost"
+  | "totalCost"
+>;
+
+function normalizedIdentityPart(value: string | number | null | undefined): string {
+  return String(value ?? "").trim().toLowerCase();
+}
+
+/**
+ * Returns stable keys for the same purchased invoice line across Discord
+ * reuploads. Order ID is the strongest identity; invoices without one use
+ * the extracted purchase fields as a fallback.
+ */
+export function purchaseIdentityKeys(row: PurchaseIdentityFields): string[] {
+  const sourceLine = row.sourceLine ?? 0;
+  const orderId = normalizedIdentityPart(row.orderId);
+  if (orderId && sourceLine > 0) {
+    return ["order:" + orderId + ":line:" + sourceLine];
+  }
+
+  const base = [
+    normalizedIdentityPart(row.seller),
+    normalizedIdentityPart(row.purchaseDate),
+    String(sourceLine),
+    normalizedIdentityPart(row.cardName),
+    normalizedIdentityPart(row.setSeries),
+    normalizedIdentityPart(row.condition),
+    normalizedIdentityPart(row.language),
+    normalizedIdentityPart(row.variantPrinting),
+    normalizedIdentityPart(row.qtyPurchased),
+    normalizedIdentityPart(row.unitCost),
+    normalizedIdentityPart(row.totalCost),
+  ].join("|");
+
+  const strict = base + "|number:" + normalizedIdentityPart(row.cardNumber);
+  return ["fallback:" + strict, "fallback-relaxed:" + base];
+}
+
 const uncertainFieldFlags: Array<{ pattern: RegExp; flag: ReviewFlag }> = [
   { pattern: /image|photo|blur|confidence/i, flag: "LOW_IMAGE_CONFIDENCE" },
   { pattern: /product(name)?|card ?name/i, flag: "CARD_NAME_UNCERTAIN" },
@@ -122,8 +173,14 @@ export function planInvoiceIngestion(
       return;
     }
 
-    const purchaseKey = invoice.orderId ? `${invoice.orderId}:line:${sourceLine}` : undefined;
-    if (existingInventoryIds.has(inventoryId) || (purchaseKey !== undefined && existingInventoryIds.has(purchaseKey))) {
+    const purchaseKeys = purchaseIdentityKeys(input);
+    if (
+      existingInventoryIds.has(inventoryId) ||
+      purchaseKeys.some((purchaseKey) => existingInventoryIds.has(purchaseKey))
+    ) {
+      input.reviewRequired = false;
+      input.reviewFlags = undefined;
+      input.reviewNotes = undefined;
       rows.push({
         ingestionKey,
         sourceMessageId,

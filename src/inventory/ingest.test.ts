@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { InvoiceData } from "../extract.js";
 import { sampleCatalog } from "../catalog/sample.js";
-import { planInvoiceIngestion } from "./ingest.js";
+import { planInvoiceIngestion, purchaseIdentityKeys } from "./ingest.js";
 
 function invoice(lineItems: InvoiceData["lineItems"]): InvoiceData {
   return {
@@ -244,7 +244,7 @@ test("records Dunsparce as a purchase even when catalog identity is unresolved",
 });
 
 test("skips an already-recorded invoice line by order and source line", () => {
-  const existing = new Set(["TEST-001:line:1"]);
+  const existing = new Set(["order:test-001:line:1"]);
   const plan = planInvoiceIngestion(sampleCatalog, invoice([
     {
       productName: "Charizard ex",
@@ -276,6 +276,8 @@ test("skips an already-recorded invoice line by order and source line", () => {
   assert.equal(plan.pendingReview, 0);
   assert.equal(plan.skipped, 1);
   assert.equal(plan.rows[0].action, "SKIP");
+  assert.equal(plan.rows[0].input.reviewRequired, false);
+  assert.equal(plan.rows[0].input.reviewFlags, undefined);
   assert.equal(plan.rows[1].action, "INSERT");
 });
 
@@ -325,4 +327,48 @@ test("makes retries idempotent when the generated inventory ID already exists", 
   assert.equal(plan.insertable, 0);
   assert.equal(plan.skipped, 1);
   assert.equal(plan.rows[0].action, "SKIP");
+});
+
+test("makes reuploads idempotent when an invoice has no order ID", () => {
+  const original = planInvoiceIngestion(sampleCatalog, {
+    ...invoice([{
+      productName: "Charizard ex",
+      setName: "151",
+      cardNumber: "006",
+      condition: "Near Mint",
+      rarity: null,
+      language: "English",
+      variant: "Normal",
+      quantity: 1,
+      unitPrice: 10,
+      totalPrice: 10,
+    }]),
+    orderId: null,
+  }, "original-message");
+
+  const existing = new Set(
+    purchaseIdentityKeys(original.rows[0].input),
+  );
+
+  const retry = planInvoiceIngestion(sampleCatalog, {
+    ...invoice([{
+      productName: "Charizard ex",
+      setName: "151",
+      cardNumber: null,
+      condition: "Near Mint",
+      rarity: null,
+      language: "English",
+      variant: "Normal",
+      quantity: 1,
+      unitPrice: 10,
+      totalPrice: 10,
+    }]),
+    orderId: null,
+  }, "reupload-message", existing, { allowMissingCardNumber: true });
+
+  assert.equal(retry.insertable, 0);
+  assert.equal(retry.pendingReview, 0);
+  assert.equal(retry.skipped, 1);
+  assert.equal(retry.rows[0].action, "SKIP");
+  assert.equal(retry.rows[0].input.reviewRequired, false);
 });

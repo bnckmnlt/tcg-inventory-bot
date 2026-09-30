@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { InvoiceData } from "./extract.js";
-import type { IngestionPlan } from "./inventory/ingest.js";
+import { purchaseIdentityKeys, type IngestionPlan } from "./inventory/ingest.js";
 import type { Catalog } from "./catalog/types.js";
 
 export interface PendingTransaction {
@@ -70,6 +70,47 @@ export function getPendingTransaction(id: string): PendingTransaction | undefine
 
 export function getPendingTransactionBySourceMessageId(sourceMessageId: string): PendingTransaction | undefined {
   return [...pendingTransactions.values()].find((transaction) => transaction.sourceMessageId === sourceMessageId);
+}
+
+function pendingPurchaseKeys(transaction: PendingTransaction): Set<string> {
+  const keys = new Set<string>();
+  for (const row of transaction.plan.rows) {
+    if (row.action === "SKIP") continue;
+    for (const key of purchaseIdentityKeys(row.input)) keys.add(key);
+  }
+  return keys;
+}
+
+/**
+ * Finds an existing pending review for the same purchased invoice, even when
+ * the user reuploads the invoice and Discord gives it a new message ID.
+ *
+ * The relaxed purchase identity deliberately ignores card number so an
+ * uncertain extraction cannot create a second pending transaction for the
+ * same invoice.
+ */
+export function getPendingTransactionByPurchaseIdentity(
+  plan: IngestionPlan,
+): PendingTransaction | undefined {
+  const incomingKeys = new Set<string>();
+  for (const row of plan.rows) {
+    if (row.action === "SKIP") continue;
+    for (const key of purchaseIdentityKeys(row.input)) {
+      if (key.startsWith("order:") || key.startsWith("fallback-relaxed:")) {
+        incomingKeys.add(key);
+      }
+    }
+  }
+
+  if (incomingKeys.size === 0) return undefined;
+
+  return [...pendingTransactions.values()].find((transaction) => {
+    const existingKeys = pendingPurchaseKeys(transaction);
+    for (const key of incomingKeys) {
+      if (existingKeys.has(key)) return true;
+    }
+    return false;
+  });
 }
 
 export function listPendingTransactions(): PendingTransaction[] {

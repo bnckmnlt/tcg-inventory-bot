@@ -82,7 +82,7 @@ test("reports pre-recorded lines as skipped when applying a full plan", () => {
       unitPrice: 10,
       totalPrice: 10,
     },
-  ]), "local-partial", new Set(["LOCAL-001:line:1"]));
+  ]), "local-partial", new Set(["order:local-001:line:1"]));
 
   const store = new InMemoryInventoryStore();
   const applied = applyInsertionPlan(store, plan.rows);

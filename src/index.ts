@@ -8,6 +8,7 @@ import {
   Events,
   GatewayIntentBits,
   Message,
+  MessageFlags,
   ModalBuilder,
   StringSelectMenuBuilder,
   StringSelectMenuOptionBuilder,
@@ -23,7 +24,7 @@ import { extractInvoice } from "./extract.js";
 import { enrichCardInput, mergeCatalog } from "./catalog/enrichment.js";
 import { TCGdexRuntime } from "./catalog/runtime.js";
 import type { Catalog } from "./catalog/types.js";
-import { planInvoiceIngestion, type IngestionPlan } from "./inventory/ingest.js";
+import { planInvoiceIngestion, purchaseIdentityKeys, type IngestionPlan } from "./inventory/ingest.js";
 import { createJsonInventoryStore } from "./inventory/json-store.js";
 import { invoicePlanToWorkbookRows, persistInvoicePlanToWorkbookSafely } from "./inventory/workbook-persistence.js";
 import { appendInventoryRowsDirectToGoogleSheets } from "./inventory/google-sheets.js";
@@ -31,6 +32,7 @@ import {
   createPendingTransaction,
   getPendingTransaction,
   getPendingTransactionBySourceMessageId,
+  getPendingTransactionByPurchaseIdentity,
   listPendingTransactions,
   removePendingTransaction,
   savePendingTransaction,
@@ -362,7 +364,11 @@ async function buildPlan(
   for (const row of store.list()) {
     existingKeys.add(row.inventoryId);
     const sourceLine = row.sourceLine ?? Number(row.inventoryId.match(/-(\d+)$/)?.[1] ?? NaN);
-    if (row.orderId && Number.isInteger(sourceLine) && sourceLine > 0) existingKeys.add(`${row.orderId}:line:${sourceLine}`);
+    if (Number.isInteger(sourceLine) && sourceLine > 0) {
+      for (const key of purchaseIdentityKeys({ ...row, sourceLine })) {
+        existingKeys.add(key);
+      }
+    }
   }
   let plan = planInvoiceIngestion(
     workingCatalog,
@@ -458,6 +464,14 @@ client.on(Events.MessageCreate, async (message: Message) => {
 
       const resolved = await buildPlan(invoice, sourceMessageId, catalog);
 
+      const existingPurchaseTransaction = getPendingTransactionByPurchaseIdentity(resolved.plan);
+      if (existingPurchaseTransaction) {
+        await message.reply(
+          `This invoice is already pending review (Transaction ${existingPurchaseTransaction.id.slice(0, 8)}). Use **/review** to reopen the existing ticket instead of creating another pending transaction.`,
+        );
+        continue;
+      }
+
       const transaction = createPendingTransaction(
         invoice,
         sourceMessageId,
@@ -491,7 +505,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
   if (interaction.isChatInputCommand() && interaction.commandName === "review") {
     const transactions = listPendingTransactions();
     if (transactions.length === 0) {
-      await interaction.reply({ content: "There are no pending invoice reviews.", ephemeral: true });
+      await interaction.reply({ content: "There are no pending invoice reviews.", flags: MessageFlags.Ephemeral });
       return;
     }
 
@@ -501,7 +515,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         ? "Select a pending invoice below. Showing the first " + shown.length + " of " + transactions.length + "."
         : "Select a pending invoice below.",
       components: [buildPendingReviewMenu()],
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
     });
     return;
   }
@@ -533,7 +547,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           content: isLastChunk ? undefined : "Invoice review - continued",
           embeds: reviewEmbedChunks[index],
           components: isLastChunk ? [reviewActionButtons(transaction)] : [],
-          ephemeral: true,
+          flags: MessageFlags.Ephemeral,
         });
       }
     } catch (error) {
@@ -541,7 +555,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       if (!interaction.replied && !interaction.deferred) {
         await interaction.reply({
           content: "I couldn't display this invoice review because the review payload was too large. The invoice is still pending; use /review again.",
-          ephemeral: true,
+          flags: MessageFlags.Ephemeral,
         });
       }
     }
@@ -554,7 +568,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
     const transaction = getPendingTransaction(transactionId);
     if (!transaction) {
-      await interaction.reply({ content: "This invoice review has expired or was already handled.", ephemeral: true });
+      await interaction.reply({ content: "This invoice review has expired or was already handled.", flags: MessageFlags.Ephemeral });
       return;
     }
 
@@ -562,7 +576,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     const row = transaction.plan.rows[rowIndex];
     const value = interaction.fields.getTextInputValue("card-number").trim().replace(/^#/, "");
     if (!row || !/^\d+$/.test(value) || Number(value) <= 0) {
-      await interaction.reply({ content: "Enter a valid positive card number, such as 006, 088, or 176.", ephemeral: true });
+      await interaction.reply({ content: "Enter a valid positive card number, such as 006, 088, or 176.", flags: MessageFlags.Ephemeral });
       return;
     }
 
@@ -581,22 +595,23 @@ client.on(Events.InteractionCreate, async (interaction) => {
       content: remaining.length === 0
         ? `✅ **${row.input.cardName || "Card"}** updated to card number **${value}**. All review issues are resolved; the invoice is ready to store.`
         : `✅ **${row.input.cardName || "Card"}** updated to card number **${value}**. ${remaining.length} review issue(s) remain; use **Resolve Review Issues** again.`,
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
     });
 
     if (interaction.message) {
       try {
-        // The /review flow uses an ephemeral message. Edit it through the
-        // interaction webhook rather than the channel message manager so the
-        // review UI can transition from "Review Now" to "Confirm & Store".
+        // Do not rebuild the full review embed here. A large invoice can span
+        // multiple Discord messages, and an ephemeral message can only be
+        // edited as a single payload. The transaction is already persisted;
+        // removing the stale controls is enough. /review re-renders the
+        // current transaction when the user wants to continue.
         await interaction.webhook.editMessage(interaction.message.id, {
-          embeds: buildReviewEmbeds(transaction.invoice, transaction.plan, transaction.id),
-          components: [],
+          components: [reviewActionButtons(transaction)],
         });
       } catch (error) {
         // The transaction is already persisted, so a failed visual refresh
         // must not turn into an unhandled client error or crash the bot.
-        console.warn("Could not refresh the ephemeral review message:", error);
+        console.warn("Could not remove stale review controls:", error);
       }
     }
     return;
@@ -611,15 +626,15 @@ client.on(Events.InteractionCreate, async (interaction) => {
   if (!transaction) {
     await interaction.reply({
       content: "This invoice review has expired or was already handled.",
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
     });
     return;
   }
 
   if (action === "later") {
-    await interaction.reply({
-      content: "Review deferred. This invoice remains pending and has not been stored. You can use **Review Now** on this message when you're ready.",
-      ephemeral: true,
+    await interaction.update({
+      content: "Review deferred. This invoice remains pending and has not been stored. Use **/review** to reopen it when you're ready.",
+      components: [],
     });
     return;
   }
@@ -627,7 +642,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
   if (action === "review") {
     const flagged = transaction.plan.rows.findIndex((row) => row.input.reviewRequired);
     if (flagged < 0) {
-      await interaction.reply({ content: "No review issues remain.", ephemeral: true });
+      await interaction.reply({ content: "No review issues remain.", flags: MessageFlags.Ephemeral });
       return;
     }
 
@@ -636,7 +651,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     if (!cardNumberFlagged) {
       await interaction.reply({
         content: `The remaining issue for **${row.input.cardName || "this card"}** is ${(row.input.reviewFlags ?? []).join(", ")}. Manual card-number correction is currently supported for CARD_NUMBER_UNCERTAIN. Use **/review** to reopen the pending invoice.`,
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
       });
       if (interaction.message) {
         try {
@@ -676,7 +691,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           `Needs data review: ${transaction.plan.pendingReview}`,
           "The invoice needs to be re-extracted or corrected before it can be recorded.",
         ].join("\n"),
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
       });
       return;
     }
@@ -726,12 +741,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
     } catch (error) {
       console.error("Failed to store confirmed invoice:", error);
       await interaction.editReply({
-        content: "The verified inventory rows were approved, but local storage failed. The review remains pending so it can be retried.",
-        components: [reviewButtons(
-          transactionId,
-          transaction.plan.insertable > 0 && !transaction.plan.rows.some((row) => row.input.reviewRequired),
-          transaction.plan.rows.some((row) => row.input.reviewRequired),
-        )],
+        content: "The verified inventory rows were approved, but local storage failed. The review remains pending. Use **/review** to retry; no review buttons are kept on this message.",
+        components: [],
       });
     }
   }
