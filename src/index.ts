@@ -46,7 +46,7 @@ function formatMoney(amount: number | null, currency: string | null): string {
 }
 
 function statusLabel(plan: IngestionPlan): string {
-  if (plan.pendingReview > 0) return "⚠️ Manual review required";
+  if (plan.pendingReview > 0 || plan.rows.some((row) => row.input.reviewRequired)) return "⚠️ Manual review recommended";
   if (plan.insertable > 0) return "✅ Ready to store";
   if (plan.skipped > 0) return "ℹ️ Already stored";
   return "ℹ️ Nothing to store";
@@ -77,7 +77,8 @@ function buildReviewEmbeds(
       { name: "Shipping", value: formatMoney(invoice.shipping, invoice.currency), inline: true },
       { name: "Tax", value: formatMoney(invoice.tax, invoice.currency), inline: true },
       { name: "Total", value: formatMoney(invoice.total, invoice.currency), inline: true },
-      { name: "Decision", value: `To record: ${plan.insertable} • Needs data review: ${plan.pendingReview} • Skipped: ${plan.skipped}`, inline: true },
+      { name: "Decision", value: `To record: ${plan.insertable} • Needs extraction review: ${plan.pendingReview} • Skipped: ${plan.skipped}`, inline: true },
+      { name: "Review flags", value: String(plan.rows.filter((row) => row.input.reviewRequired).length), inline: true },
     )
     .setFooter({ text: `Transaction ${transactionLabel} • Pending confirmation` });
 
@@ -105,11 +106,14 @@ function buildReviewEmbeds(
         `Qty: ${row.input.qtyPurchased ?? "?"}`,
         `Unit: ${formatMoney(row.input.unitCost ?? null, invoice.currency)}`,
         `SKU: ${row.skuId ?? "UNRESOLVED (purchase still recorded)"}`,
+        row.input.reviewRequired
+          ? `⚠️ REVIEW REQUIRED: ${(row.input.reviewFlags ?? []).join(", ")}`
+          : "Review: clear",
       ].join("\n");
 
       cardEmbed.addFields({
         name: `${index}. ${row.input.cardName || "Unknown card"} — ${row.action}`,
-        value: `${details}\n\nReason: ${row.reasons.join(" ").slice(0, 700)}`,
+        value: `${details}${row.input.reviewNotes?.length ? `\nNotes: ${row.input.reviewNotes.join(" ").slice(0, 500)}` : ""}\n\nReason: ${row.reasons.join(" ").slice(0, 700)}`,
         inline: false,
       });
     });
@@ -338,11 +342,12 @@ client.on(Events.InteractionCreate, async (interaction) => {
           `Transaction ${transactionId.slice(0, 8)}`,
           `Inserted: ${applied.inserted}`,
           `Skipped: ${applied.skipped}`,
-          `Pending review: ${transaction.plan.pendingReview}`,
+          `Needs extraction review: ${transaction.plan.pendingReview}`,
+          `Rows with review flags: ${transaction.plan.rows.filter((row) => row.input.reviewRequired).length}`,
           "",
           transaction.plan.pendingReview > 0
-            ? "All valid purchases were recorded. Rows needing extraction/data review remain outside inventory until corrected."
-            : "All invoice rows were recorded.",
+            ? "All valid purchases were recorded. Rows with missing minimum fields still need extraction correction. Review flags on recorded rows remain attached to those inventory lots."
+            : "All invoice rows were recorded. Any review flags remain attached to the corresponding inventory lots for later correction.",
           "",
           `Inventory file: ${inventoryPath}`,
           "Google Sheets persistence is intentionally not connected yet.",

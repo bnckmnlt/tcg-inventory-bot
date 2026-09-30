@@ -103,6 +103,49 @@ test("records ambiguous or conflicting purchases without inventing a SKU", () =>
   assert.equal(plan.rows[0].skuId, undefined);
 });
 
+test("flags uncertain card extraction without blocking the purchase", () => {
+  const plan = planInvoiceIngestion(sampleCatalog, {
+    ...invoice([{
+      productName: "Pawmi",
+      setName: "Example Set",
+      cardNumber: null,
+      condition: "Near Mint",
+      rarity: "Common",
+      language: "English",
+      variant: "Normal",
+      quantity: 1,
+      unitPrice: 1.5,
+      totalPrice: 1.5,
+    }]),
+    uncertainFields: ["productName row 1: text is difficult to read"],
+  }, "msg-uncertain", new Set(), { allowMissingCardNumber: true });
+
+  assert.equal(plan.insertable, 1);
+  assert.equal(plan.pendingReview, 0);
+  assert.equal(plan.rows[0].action, "INSERT");
+  assert.equal(plan.rows[0].input.reviewRequired, true);
+  assert.deepEqual(plan.rows[0].input.reviewFlags, ["CARD_NAME_UNCERTAIN"]);
+  assert.match(plan.rows[0].input.reviewNotes?.[0] ?? "", /difficult to read/);
+});
+
+test("does not treat missing SKU as an extraction review issue", () => {
+  const plan = planInvoiceIngestion(sampleCatalog, invoice([{
+    productName: "Articuno",
+    setName: "Trading Card Game Classic",
+    cardNumber: "9",
+    condition: "Near Mint",
+    rarity: "Holofoil",
+    language: "English",
+    variant: "Holofoil",
+    quantity: 1,
+    unitPrice: 10,
+    totalPrice: 10,
+  }]), "msg-no-sku-review");
+
+  assert.equal(plan.rows[0].input.reviewRequired, false);
+  assert.deepEqual(plan.rows[0].input.reviewFlags, undefined);
+});
+
 test("records Dunsparce as a purchase even when catalog identity is unresolved", () => {
   const plan = planInvoiceIngestion(sampleCatalog, invoice([{
     productName: "Dunsparce",

@@ -1,7 +1,7 @@
 import type { InvoiceData, InvoiceLineItem } from "../extract.js";
 import type { Catalog, MatchState } from "../catalog/types.js";
 import { resolveCardInput } from "../catalog/resolver.js";
-import type { V2InventoryRow } from "./types.js";
+import type { ReviewFlag, V2InventoryRow } from "./types.js";
 
 export type IngestionAction = "INSERT" | "PENDING_REVIEW" | "SKIP";
 
@@ -24,11 +24,44 @@ export interface IngestionPlan {
   skipped: number;
 }
 
+const uncertainFieldFlags: Array<{ pattern: RegExp; flag: ReviewFlag }> = [
+  { pattern: /image|photo|blur|confidence/i, flag: "LOW_IMAGE_CONFIDENCE" },
+  { pattern: /product(name)?|card ?name/i, flag: "CARD_NAME_UNCERTAIN" },
+  { pattern: /set/i, flag: "SET_UNCERTAIN" },
+  { pattern: /card ?number|number/i, flag: "CARD_NUMBER_UNCERTAIN" },
+  { pattern: /condition/i, flag: "CONDITION_UNCERTAIN" },
+  { pattern: /variant|printing/i, flag: "VARIANT_UNCERTAIN" },
+  { pattern: /quantity|qty/i, flag: "QUANTITY_UNCERTAIN" },
+  { pattern: /price|cost/i, flag: "PRICE_UNCERTAIN" },
+];
+
+function reviewMetadataForLine(invoice: InvoiceData, sourceLine: number): { flags: ReviewFlag[]; notes: string[] } {
+  const flags = new Set<ReviewFlag>();
+  const notes: string[] = [];
+
+  for (const uncertainty of invoice.uncertainFields) {
+    const rowMatch = uncertainty.match(/(?:row|line)\s*#?\s*(\d+)/i);
+    if (rowMatch && Number(rowMatch[1]) !== sourceLine) continue;
+
+    let matched = false;
+    for (const candidate of uncertainFieldFlags) {
+      if (candidate.pattern.test(uncertainty)) {
+        flags.add(candidate.flag);
+        matched = true;
+      }
+    }
+
+    if (matched || !rowMatch) notes.push(uncertainty);
+  }
+
+  return { flags: [...flags], notes };
+}
+
 function requiredText(value: string | null | undefined, fallback = ""): string {
   return value?.trim() || fallback;
 }
 
-function lineToInventoryInput(line: InvoiceLineItem, inventoryId: string, invoice: InvoiceData): V2InventoryRow {
+function lineToInventoryInput(line: InvoiceLineItem, inventoryId: string, invoice: InvoiceData, review: { flags: ReviewFlag[]; notes: string[] }): V2InventoryRow {
   return {
     inventoryId,
     cardName: requiredText(line.productName),
@@ -45,6 +78,9 @@ function lineToInventoryInput(line: InvoiceLineItem, inventoryId: string, invoic
     purchaseDate: invoice.purchaseDate ?? undefined,
     seller: invoice.seller ?? undefined,
     orderId: invoice.orderId ?? undefined,
+    reviewRequired: review.flags.length > 0,
+    reviewFlags: review.flags.length > 0 ? review.flags : undefined,
+    reviewNotes: review.notes.length > 0 ? review.notes : undefined,
   };
 }
 
@@ -68,7 +104,8 @@ export function planInvoiceIngestion(
     const sourceLine = index + 1;
     const ingestionKey = `${sourceMessageId}:line:${sourceLine}`;
     const inventoryId = `IMG-${sourceMessageId}-${String(sourceLine).padStart(3, "0")}`;
-    const input = lineToInventoryInput(line, inventoryId, invoice);
+    const review = reviewMetadataForLine(invoice, sourceLine);
+    const input = lineToInventoryInput(line, inventoryId, invoice, review);
 
     if (!line.productName || !line.setName || (!options.allowMissingCardNumber && !line.cardNumber) || !line.quantity || line.quantity < 1) {
       rows.push({

@@ -1,5 +1,15 @@
 import type { CardInput, MatchState, Sku } from "../catalog/types.js";
 
+export type ReviewFlag =
+  | "LOW_IMAGE_CONFIDENCE"
+  | "CARD_NAME_UNCERTAIN"
+  | "SET_UNCERTAIN"
+  | "CARD_NUMBER_UNCERTAIN"
+  | "CONDITION_UNCERTAIN"
+  | "VARIANT_UNCERTAIN"
+  | "QUANTITY_UNCERTAIN"
+  | "PRICE_UNCERTAIN";
+
 export interface V2InventoryRow {
   inventoryId: string;
   cardName: string;
@@ -19,6 +29,9 @@ export interface V2InventoryRow {
   skuId?: string;
   resolutionState?: MatchState;
   resolutionReasons?: string[];
+  reviewRequired?: boolean;
+  reviewFlags?: ReviewFlag[];
+  reviewNotes?: string[];
 }
 
 export interface ResolvedInventoryLot {
