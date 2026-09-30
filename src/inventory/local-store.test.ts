@@ -56,6 +56,42 @@ test("applies only verified INSERT rows to the local store", () => {
   assert.equal(store.list()[0].cardName, "Charizard ex");
 });
 
+test("reports pre-recorded lines as skipped when applying a full plan", () => {
+  const plan = planInvoiceIngestion(sampleCatalog, invoice([
+    {
+      productName: "Charizard ex",
+      setName: "151",
+      cardNumber: "6/165",
+      condition: "Near Mint",
+      rarity: "Double Rare",
+      language: "English",
+      variant: "Normal",
+      quantity: 1,
+      unitPrice: 10,
+      totalPrice: 10,
+    },
+    {
+      productName: "Articuno",
+      setName: "Trading Card Game Classic",
+      cardNumber: "9",
+      condition: "Near Mint",
+      rarity: "Holofoil",
+      language: "English",
+      variant: "Holofoil",
+      quantity: 1,
+      unitPrice: 10,
+      totalPrice: 10,
+    },
+  ]), "local-partial", new Set(["LOCAL-001:line:1"]));
+
+  const store = new InMemoryInventoryStore();
+  const applied = applyInsertionPlan(store, plan.rows);
+
+  assert.deepEqual(applied, { inserted: 1, skipped: 1, pendingReview: 0 });
+  assert.equal(store.list().length, 1);
+  assert.equal(store.list()[0].cardName, "Articuno");
+});
+
 test("reapplying the same plan is idempotent", () => {
   const plan = planInvoiceIngestion(sampleCatalog, invoice([{
     productName: "Charizard ex",

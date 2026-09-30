@@ -169,6 +169,71 @@ test("records Dunsparce as a purchase even when catalog identity is unresolved",
   assert.equal(plan.rows[0].input.skuId, undefined);
 });
 
+test("skips an already-recorded invoice line by order and source line", () => {
+  const existing = new Set(["TEST-001:line:1"]);
+  const plan = planInvoiceIngestion(sampleCatalog, invoice([
+    {
+      productName: "Charizard ex",
+      setName: "151",
+      cardNumber: "006",
+      condition: "Near Mint",
+      rarity: null,
+      language: "English",
+      variant: "Normal",
+      quantity: 1,
+      unitPrice: 10,
+      totalPrice: 10,
+    },
+    {
+      productName: "Charizard ex",
+      setName: "151",
+      cardNumber: "006",
+      condition: "Near Mint",
+      rarity: null,
+      language: "English",
+      variant: "Normal",
+      quantity: 2,
+      unitPrice: 10,
+      totalPrice: 20,
+    },
+  ]), "new-message", existing);
+
+  assert.equal(plan.insertable, 1);
+  assert.equal(plan.pendingReview, 0);
+  assert.equal(plan.skipped, 1);
+  assert.equal(plan.rows[0].action, "SKIP");
+  assert.equal(plan.rows[1].action, "INSERT");
+});
+
+test("keeps extraction review metadata on the inventory input", () => {
+  const plan = planInvoiceIngestion(sampleCatalog, {
+    ...invoice([{
+      productName: "Pawmi",
+      setName: "Example Set",
+      cardNumber: "001",
+      condition: "Near Mint",
+      rarity: "Common",
+      language: "English",
+      variant: "Normal",
+      quantity: 1,
+      unitPrice: 1.5,
+      totalPrice: 1.5,
+    }]),
+    uncertainFields: [
+      "productName row 1: text is difficult to read",
+      "quantity row 1: unclear",
+    ],
+  }, "msg-review");
+
+  const input = plan.rows[0].input;
+  assert.equal(input.reviewRequired, true);
+  assert.deepEqual(input.reviewFlags, ["CARD_NAME_UNCERTAIN", "QUANTITY_UNCERTAIN"]);
+  assert.deepEqual(input.reviewNotes, [
+    "productName row 1: text is difficult to read",
+    "quantity row 1: unclear",
+  ]);
+});
+
 test("makes retries idempotent when the generated inventory ID already exists", () => {
   const plan = planInvoiceIngestion(sampleCatalog, invoice([{
     productName: "Charizard ex",

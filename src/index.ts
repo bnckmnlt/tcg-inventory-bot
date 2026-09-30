@@ -312,9 +312,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
     await interaction.deferUpdate();
 
     try {
-      const insertableRows = transaction.plan.rows.filter((row) => row.action === "INSERT");
       const currentInventoryStore = await createJsonInventoryStore(inventoryPath);
-      const applied = await currentInventoryStore.apply(insertableRows);
+      const applied = await currentInventoryStore.apply(transaction.plan.rows);
       removePendingTransaction(transactionId);
 
       await interaction.editReply({
