@@ -14,6 +14,7 @@ export function normalizeSetName(value: string | undefined): string {
   const aliases: Record<string, string> = {
     "scarlet violet promo": "svp black star promos",
     "mega evolution promo": "mep black star promos",
+    "scarlet & violet energies": "scarlet & violet energy",
   };
   return aliases[normalized] ?? normalized;
 }

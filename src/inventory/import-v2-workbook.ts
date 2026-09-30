@@ -1,5 +1,5 @@
 import { readV2InventoryWorkbook } from "./read-xlsx.js";
-import { summarizeStates, resolveInventoryRows } from "./resolver.js";
+import { summarizeStates, resolveInventoryRows, resolveInventoryRowsRuntime } from "./resolver.js";
 import { readFileSync } from "node:fs";
 import type { Catalog } from "../catalog/types.js";
 
@@ -10,13 +10,15 @@ if (!path) {
 }
 
 const parsed = readV2InventoryWorkbook(path);
+const useLocalCatalog = process.argv.includes("--local-catalog");
 const catalogPath = "data/catalog.json";
-const catalog = JSON.parse(readFileSync(catalogPath, "utf8")) as Catalog;
-const resolved = resolveInventoryRows(catalog, parsed.rows);
+const resolved = useLocalCatalog
+  ? resolveInventoryRows(JSON.parse(readFileSync(catalogPath, "utf8")) as Catalog, parsed.rows)
+  : await resolveInventoryRowsRuntime(parsed.rows);
 
 console.log(JSON.stringify({
   workbook: path,
-  catalog: catalogPath,
+  catalog: useLocalCatalog ? catalogPath : "TCGdex runtime (on-demand)",
   parsedRows: parsed.rows.length,
   issues: parsed.issues,
   resolutionStates: summarizeStates(resolved),

@@ -1,5 +1,6 @@
 import type { Catalog, CardInput, MatchState } from "../catalog/types.js";
 import { resolveCardInput } from "../catalog/resolver.js";
+import { TCGdexRuntime } from "../catalog/runtime.js";
 import type { InventoryResolution, ResolvedInventoryLot, V2InventoryRow } from "./types.js";
 
 function toCardInput(row: V2InventoryRow): CardInput {
@@ -71,6 +72,50 @@ export function resolveInventoryLots(catalog: Catalog, rows: V2InventoryRow[], i
 
 export function resolveInventoryRows(catalog: Catalog, rows: V2InventoryRow[]): ResolvedInventoryLot[] {
   return rows.map((row) => resolveInventoryLot(catalog, row));
+}
+
+export async function resolveInventoryRowsRuntime(
+  rows: V2InventoryRow[],
+  runtime = new TCGdexRuntime(),
+): Promise<ResolvedInventoryLot[]> {
+  const resolved: ResolvedInventoryLot[] = [];
+
+  for (const row of rows) {
+    const input = toCardInput(row);
+    const placeholder = row.cardNumber.trim() === "1";
+    const lookupInput = placeholder ? { ...input, cardNumber: undefined } : input;
+    const runtimeResult = await runtime.resolve(lookupInput);
+
+    if (placeholder) {
+      resolved.push({
+        inventoryId: row.inventoryId,
+        input,
+        remainingQty: row.remainingQty,
+        state: "INCOMPLETE",
+        reasons: runtimeResult.candidates.length === 1
+          ? ["Card number is a known V2 placeholder and requires manual mapping."]
+          : [
+              "Card number is a known V2 placeholder and requires manual mapping.",
+              runtimeResult.candidates.length === 0
+                ? "No TCGdex candidate matched the supplied set/name."
+                : "Multiple TCGdex candidates matched the supplied set/name.",
+            ],
+      });
+      continue;
+    }
+
+    const result = resolveCardInput(runtimeResult.catalog, input);
+    resolved.push({
+      inventoryId: row.inventoryId,
+      input,
+      remainingQty: row.remainingQty,
+      state: result.state,
+      sku: result.sku,
+      reasons: result.reasons,
+    });
+  }
+
+  return resolved;
 }
 
 export function summarizeStates(lots: ResolvedInventoryLot[]): Record<MatchState, number> {
