@@ -30,6 +30,7 @@ import { appendInventoryRowsDirectToGoogleSheets } from "./inventory/google-shee
 import {
   createPendingTransaction,
   getPendingTransaction,
+  getPendingTransactionBySourceMessageId,
   listPendingTransactions,
   removePendingTransaction,
   savePendingTransaction,
@@ -82,6 +83,40 @@ function statusLabel(plan: IngestionPlan): string {
   if (plan.insertable > 0) return "✅ Ready to store";
   if (plan.skipped > 0) return "ℹ️ Already stored";
   return "ℹ️ Nothing to store";
+}
+
+function truncateDiscord(value: string, maxLength: number): string {
+  return value.length <= maxLength ? value : `${value.slice(0, Math.max(0, maxLength - 1))}…`;
+}
+
+function embedCharacterCount(embed: EmbedBuilder): number {
+  const data = embed.toJSON();
+  return (
+    (data.title?.length ?? 0) +
+    (data.description?.length ?? 0) +
+    (data.footer?.text?.length ?? 0) +
+    (data.author?.name?.length ?? 0) +
+    (data.fields?.reduce((sum, field) => sum + field.name.length + field.value.length, 0) ?? 0)
+  );
+}
+
+function chunkReviewEmbeds(embeds: EmbedBuilder[]): EmbedBuilder[][] {
+  const chunks: EmbedBuilder[][] = [];
+  let current: EmbedBuilder[] = [];
+  let currentSize = 0;
+  for (const embed of embeds) {
+    const size = embedCharacterCount(embed);
+    if (size > 6000) throw new Error(`Invoice review embed exceeds Discord's 6000-character limit (${size}).`);
+    if (current.length > 0 && (currentSize + size > 5800 || current.length >= 10)) {
+      chunks.push(current);
+      current = [];
+      currentSize = 0;
+    }
+    current.push(embed);
+    currentSize += size;
+  }
+  if (current.length > 0) chunks.push(current);
+  return chunks;
 }
 
 function buildReviewEmbeds(
@@ -144,8 +179,11 @@ function buildReviewEmbeds(
       ].join("\n");
 
       cardEmbed.addFields({
-        name: `${index}. ${row.input.cardName || "Unknown card"} — ${row.action}`,
-        value: `${details}${row.input.reviewNotes?.length ? `\nNotes: ${row.input.reviewNotes.join(" ").slice(0, 500)}` : ""}\n\nReason: ${row.reasons.join(" ").slice(0, 700)}`,
+        name: truncateDiscord(`${index}. ${row.input.cardName || "Unknown card"} — ${row.action}`, 256),
+        value: truncateDiscord(
+          `${details}${row.input.reviewNotes?.length ? `\nNotes: ${row.input.reviewNotes.join(" ").slice(0, 500)}` : ""}\n\nReason: ${row.reasons.join(" ").slice(0, 700)}`,
+          1024,
+        ),
         inline: false,
       });
     });
@@ -412,6 +450,12 @@ client.on(Events.MessageCreate, async (message: Message) => {
 
       const catalog = await loadCatalog();
       const sourceMessageId = `DISCORD-${message.id}-${attachment.id}`;
+      const existingTransaction = getPendingTransactionBySourceMessageId(sourceMessageId);
+      if (existingTransaction) {
+        await message.reply(`This invoice is already pending review (Transaction ${existingTransaction.id.slice(0, 8)}). Use **Review Now** or **Review Later** on the existing ticket.`);
+        continue;
+      }
+
       const resolved = await buildPlan(invoice, sourceMessageId, catalog);
 
       const transaction = createPendingTransaction(
@@ -424,11 +468,11 @@ client.on(Events.MessageCreate, async (message: Message) => {
 
       const reviewEmbeds = buildReviewEmbeds(invoice, resolved.plan, transaction.id);
 
-      for (let index = 0; index < reviewEmbeds.length; index += 10) {
-        const embedChunk = reviewEmbeds.slice(index, index + 10);
-        const isLastChunk = index + 10 >= reviewEmbeds.length;
+      const reviewEmbedChunks = chunkReviewEmbeds(reviewEmbeds);
+      for (let index = 0; index < reviewEmbedChunks.length; index += 1) {
+        const isLastChunk = index === reviewEmbedChunks.length - 1;
         await message.reply({
-          embeds: embedChunk,
+          embeds: reviewEmbedChunks[index],
           components: isLastChunk
             ? [reviewButtons(transaction.id, resolved.plan.insertable > 0 && !resolved.plan.rows.some((row) => row.input.reviewRequired), resolved.plan.rows.some((row) => row.input.reviewRequired))]
             : [],
@@ -470,11 +514,37 @@ client.on(Events.InteractionCreate, async (interaction) => {
       return;
     }
 
-    await interaction.update({
-      content: "Pending invoice " + transaction.id.slice(0, 8),
-      embeds: buildReviewEmbeds(transaction.invoice, transaction.plan, transaction.id),
-      components: [reviewActionButtons(transaction)],
-    });
+    try {
+      const reviewEmbedChunks = chunkReviewEmbeds(
+        buildReviewEmbeds(transaction.invoice, transaction.plan, transaction.id),
+      );
+
+      await interaction.update({
+        content: "Pending invoice " + transaction.id.slice(0, 8),
+        embeds: reviewEmbedChunks[0],
+        components: reviewEmbedChunks.length === 1
+          ? [reviewActionButtons(transaction)]
+          : [],
+      });
+
+      for (let index = 1; index < reviewEmbedChunks.length; index += 1) {
+        const isLastChunk = index === reviewEmbedChunks.length - 1;
+        await interaction.followUp({
+          content: isLastChunk ? undefined : "Invoice review - continued",
+          embeds: reviewEmbedChunks[index],
+          components: isLastChunk ? [reviewActionButtons(transaction)] : [],
+          ephemeral: true,
+        });
+      }
+    } catch (error) {
+      console.error("Failed to display invoice review:", error);
+      if (!interaction.replied && !interaction.deferred) {
+        await interaction.reply({
+          content: "I couldn't display this invoice review because the review payload was too large. The invoice is still pending; use /review again.",
+          ephemeral: true,
+        });
+      }
+    }
     return;
   }
 

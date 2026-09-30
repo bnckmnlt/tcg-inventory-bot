@@ -68,6 +68,10 @@ export function getPendingTransaction(id: string): PendingTransaction | undefine
   return pendingTransactions.get(id);
 }
 
+export function getPendingTransactionBySourceMessageId(sourceMessageId: string): PendingTransaction | undefined {
+  return [...pendingTransactions.values()].find((transaction) => transaction.sourceMessageId === sourceMessageId);
+}
+
 export function listPendingTransactions(): PendingTransaction[] {
   return [...pendingTransactions.values()];
 }
