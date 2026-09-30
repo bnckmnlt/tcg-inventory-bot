@@ -40,16 +40,29 @@ export function normalizeLanguage(value: string | undefined): string {
   return value?.trim() ?? "";
 }
 
-export function normalizeVariant(value: string | undefined): string {
-  const normalized = normalizeText(value);
+export function normalizeVariant(value: string | null | undefined): string {
+  const normalized = normalizeText(value ?? undefined);
   if (!normalized || normalized === "normal") return "Normal";
   const aliases: Record<string, string> = {
     holofoil: "holo",
+    foil: "holo",
     "reverse holo": "reverse",
     "reverse holofoil": "reverse",
+    "reverse foil": "reverse",
     "cracked ice holo": "Normal",
   };
   return aliases[normalized] ?? normalized;
+}
+
+/**
+ * Return the exact printing labels expected by the inventory/workbook surface.
+ * Internal catalog data may use compact labels such as "holo" and "reverse".
+ */
+export function normalizeInventoryVariant(value: string | null | undefined): string {
+  const semantic = normalizeVariant(value);
+  if (semantic === "holo") return "Holofoil";
+  if (semantic === "reverse") return "Reverse Holofoil";
+  return value?.trim() || "Normal";
 }
 
 /**

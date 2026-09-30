@@ -140,8 +140,9 @@ export async function extractInvoice(filePath: string): Promise<InvoiceData> {
               "Extract setName from the text directly beneath the product name, not from a different row.",
               "If a card number such as 025/165 is visibly included in the item text, extract it as cardNumber; otherwise use null.",
               "Extract rarity from the rarity line in Details, separately from condition.",
-              "If Details says something like 'Near Mint Holofoil', set condition to 'Near Mint' and variant to 'Holo' when that is the printing treatment being described.",
-              "Do not treat the condition word itself as a variant. Preserve explicit printing treatments such as Holo, Reverse Holo, 1st Edition, Unlimited, Promo, Full Art, Poké Ball pattern, or Master Ball pattern when supported by the row.",
+              "If Details says something like 'Near Mint Holofoil', set condition to 'Near Mint' and variant to exactly 'Holofoil'. If it says 'Near Mint Reverse Holofoil', set condition to 'Near Mint' and variant to exactly 'Reverse Holofoil'.",
+              "Do not output the generic variant label 'Foil' when the invoice identifies Holofoil or Reverse Holofoil. Use exactly 'Holofoil' or 'Reverse Holofoil' so the value falls within the inventory import's supported range.",
+              "Do not treat the condition word itself as a variant. Preserve explicit printing treatments such as Holofoil, Reverse Holofoil, 1st Edition, Unlimited, Promo, Full Art, Poké Ball pattern, or Master Ball pattern when supported by the row.",
               "Extract quantity only from the Quantity column and unitPrice only from the Price column.",
               "Calculate totalPrice as unitPrice multiplied by quantity only when both values are clearly present and the arithmetic agrees with the invoice; otherwise use the visible row total if one exists or null.",
               "If a field is difficult to read or ambiguous, add its field name and row number to uncertainFields."

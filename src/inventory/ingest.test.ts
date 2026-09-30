@@ -19,6 +19,38 @@ function invoice(lineItems: InvoiceData["lineItems"]): InvoiceData {
   };
 }
 
+test("canonicalizes foil variants to the inventory import labels", () => {
+  const holo = planInvoiceIngestion(sampleCatalog, invoice([{
+    productName: "Charizard ex",
+    setName: "151",
+    cardNumber: "6/165",
+    condition: "Near Mint",
+    rarity: "Double Rare",
+    language: "English",
+    variant: "Foil",
+    quantity: 1,
+    unitPrice: 10,
+    totalPrice: 10,
+  }]), "msg-foil");
+
+  assert.equal(holo.rows[0].input.variantPrinting, "Holofoil");
+
+  const reverse = planInvoiceIngestion(sampleCatalog, invoice([{
+    productName: "Pikachu",
+    setName: "Scarlet & Violet Black Star Promos",
+    cardNumber: "088",
+    condition: "Near Mint",
+    rarity: "Promo",
+    language: "English",
+    variant: "Reverse Holofoil",
+    quantity: 1,
+    unitPrice: 10,
+    totalPrice: 10,
+  }]), "msg-reverse-foil");
+
+  assert.equal(reverse.rows[0].input.variantPrinting, "Reverse Holofoil");
+});
+
 test("plans an exact parsed card for insertion", () => {
   const plan = planInvoiceIngestion(sampleCatalog, invoice([{
     productName: "Charizard ex",

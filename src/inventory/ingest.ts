@@ -1,6 +1,7 @@
 import type { InvoiceData, InvoiceLineItem } from "../extract.js";
 import type { Catalog, MatchState } from "../catalog/types.js";
 import { resolveCardInput } from "../catalog/resolver.js";
+import { normalizeInventoryVariant } from "../catalog/normalize.js";
 import type { ReviewFlag, V2InventoryRow } from "./types.js";
 
 export type IngestionAction = "INSERT" | "PENDING_REVIEW" | "SKIP";
@@ -69,7 +70,7 @@ function lineToInventoryInput(line: InvoiceLineItem, inventoryId: string, invoic
     cardNumber: requiredText(line.cardNumber),
     condition: requiredText(line.condition),
     language: requiredText(line.language, "English"),
-    variantPrinting: requiredText(line.variant, "Normal"),
+    variantPrinting: normalizeInventoryVariant(line.variant),
     rarity: line.rarity ?? undefined,
     remainingQty: line.quantity ?? 0,
     qtyPurchased: line.quantity ?? undefined,
