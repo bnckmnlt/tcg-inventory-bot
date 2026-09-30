@@ -17,11 +17,6 @@ function decodeXml(value: string): string {
     .replace(/&amp;/g, "&");
 }
 
-function tagText(xml: string, tag: string): string {
-  const match = xml.match(new RegExp(`<${tag}[^>]*>([\\s\\S]*?)</${tag}>`));
-  return match ? decodeXml(match[1].replace(/<[^>]+>/g, "")) : "";
-}
-
 function columnNumber(reference: string): number {
   const letters = reference.match(/^[A-Z]+/i)?.[0].toUpperCase() ?? "";
   let number = 0;

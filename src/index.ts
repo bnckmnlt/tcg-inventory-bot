@@ -316,8 +316,6 @@ async function buildPlan(
   return { catalog: workingCatalog, plan };
 }
 
-const inventoryStore = await createJsonInventoryStore(inventoryPath);
-
 client.once(Events.ClientReady, (readyClient) => {
   console.log(`Logged in as ${readyClient.user.tag}`);
   console.log(`Inventory persistence: ${inventoryPath}`);
@@ -341,11 +339,6 @@ client.on(Events.MessageCreate, async (message: Message) => {
       await message.reply(`📥 Invoice received. Extracting and resolving **${attachment.name ?? "invoice"}**...`);
 
       const invoice = await extractInvoice(filePath);
-
-      // Reload from disk for every invoice so duplicate detection always sees
-      // the latest persisted inventory, even if the bot has been running for
-      // a long time or another process wrote the inventory file.
-      const currentInventoryStore = await createJsonInventoryStore(inventoryPath);
 
       const catalog = await loadCatalog();
       const sourceMessageId = `DISCORD-${message.id}-${attachment.id}`;

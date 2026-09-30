@@ -299,7 +299,6 @@ export class TCGdexRuntime {
     const setName = normalizeSetName(input.setName);
     if (!setName) return [];
 
-    const embeddedSetCode = legacySetCode(input.name ?? "");
     const specialClassic = classicCandidate(input);
     if (specialClassic) return [specialClassic];
 

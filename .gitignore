@@ -6,3 +6,5 @@ data/pending-transactions.json
 data/catalog-batch*.json
 src/catalog/inspect-resolver.ts
 credentials/
+# Local runtime inventory state
+data/inventory.json

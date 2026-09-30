@@ -85,7 +85,6 @@ const strings = sharedStrings(path);
 const targets = sheetTargets(path);
 const sales = readSheet(path, targets.get("Sales Log")!, strings);
 const alloc = readSheet(path, targets.get("Cost Allocations")!, strings);
-const inventory = readSheet(path, targets.get("Inventory")!, strings);
 
 const issues: Array<Record<string, unknown>> = [];
 const warn = (type: string, detail: Record<string, unknown>) => issues.push({ type, ...detail });
