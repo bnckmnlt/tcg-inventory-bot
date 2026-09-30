@@ -149,6 +149,29 @@ export function planInvoiceIngestion(
     input.resolutionState = resolved.state;
     input.resolutionReasons = resolved.reasons;
 
+    // Prefer a verified catalog number over the temporary review sentinel.
+    // Only replace it when the resolver proves an exact printing identity.
+    if (!input.cardNumber && resolved.printing?.cardNumber) {
+      input.cardNumber = resolved.printing.cardNumber;
+      input.resolutionReasons = [
+        ...resolved.reasons,
+        "Card number inferred from the exact catalog printing: " + resolved.printing.cardNumber + ".",
+      ];
+    } else if (!input.cardNumber && options.allowMissingCardNumber) {
+      // Workbook persistence requires a non-blank Card Number. When extraction
+      // cannot provide one and the resolver cannot prove one from the catalog,
+      // keep the purchase insertable with a reviewable sentinel value. This is
+      // deliberately not presented as a verified card number: the review flag
+      // tells the operator to replace "1" with the real number when known.
+      input.cardNumber = "1";
+      input.reviewRequired = true;
+      input.reviewFlags = [...new Set([...(input.reviewFlags ?? []), "CARD_NUMBER_UNCERTAIN" as ReviewFlag])];
+      input.reviewNotes = [
+        ...(input.reviewNotes ?? []),
+        'Card number was not extracted or verified; temporary value "1" was used. Replace it during review when the valid card number is known.',
+      ];
+    }
+
     rows.push({
       ingestionKey,
       sourceMessageId,

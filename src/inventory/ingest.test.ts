@@ -60,6 +60,48 @@ test("holds incomplete parsed data for review", () => {
   assert.equal(plan.rows[0].state, "INCOMPLETE");
 });
 
+test("fills a missing card number from an exact catalog printing", () => {
+  const plan = planInvoiceIngestion(sampleCatalog, invoice([{
+    productName: "Pikachu",
+    setName: "Scarlet & Violet Black Star Promos",
+    cardNumber: null,
+    condition: "Near Mint",
+    rarity: "Promo",
+    language: "English",
+    variant: "Normal",
+    quantity: 1,
+    unitPrice: 10,
+    totalPrice: 10,
+  }]), "msg-infer-number", new Set(), { allowMissingCardNumber: true });
+
+  assert.equal(plan.insertable, 1);
+  assert.equal(plan.rows[0].state, "EXACT");
+  assert.equal(plan.rows[0].input.cardNumber, "088");
+  assert.match(plan.rows[0].input.resolutionReasons?.at(-1) ?? "", /inferred from the exact catalog printing: 088/);
+});
+
+test("uses a reviewable card-number sentinel when no number can be verified", () => {
+  const plan = planInvoiceIngestion(sampleCatalog, invoice([{
+    productName: "Unknown Card",
+    setName: "Unknown Set",
+    cardNumber: null,
+    condition: "Near Mint",
+    rarity: null,
+    language: "English",
+    variant: "Normal",
+    quantity: 1,
+    unitPrice: 10,
+    totalPrice: 10,
+  }]), "msg-card-number-fallback", new Set(), { allowMissingCardNumber: true });
+
+  assert.equal(plan.insertable, 1);
+  assert.equal(plan.rows[0].action, "INSERT");
+  assert.equal(plan.rows[0].input.cardNumber, "1");
+  assert.equal(plan.rows[0].input.reviewRequired, true);
+  assert.deepEqual(plan.rows[0].input.reviewFlags, ["CARD_NUMBER_UNCERTAIN"]);
+  assert.match(plan.rows[0].input.reviewNotes?.[0] ?? "", /temporary value "1" was used/);
+});
+
 test("records a stable purchase even when no SKU exists", () => {
   const plan = planInvoiceIngestion(sampleCatalog, invoice([{
     productName: "Articuno",
@@ -124,7 +166,7 @@ test("flags uncertain card extraction without blocking the purchase", () => {
   assert.equal(plan.pendingReview, 0);
   assert.equal(plan.rows[0].action, "INSERT");
   assert.equal(plan.rows[0].input.reviewRequired, true);
-  assert.deepEqual(plan.rows[0].input.reviewFlags, ["CARD_NAME_UNCERTAIN"]);
+  assert.deepEqual(plan.rows[0].input.reviewFlags, ["CARD_NAME_UNCERTAIN", "CARD_NUMBER_UNCERTAIN"]);
   assert.match(plan.rows[0].input.reviewNotes?.[0] ?? "", /difficult to read/);
 });
 
