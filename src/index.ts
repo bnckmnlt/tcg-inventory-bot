@@ -27,6 +27,7 @@ import {
   createPendingTransaction,
   getPendingTransaction,
   removePendingTransaction,
+  savePendingTransaction,
 } from "./transaction.js";
 
 const token = process.env.DISCORD_TOKEN;
@@ -397,6 +398,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       ...(row.input.resolutionReasons ?? []),
       `Card number manually confirmed in Discord review: ${value}.`,
     ];
+    savePendingTransaction(transaction);
 
     const remaining = transaction.plan.rows.filter((candidate) => candidate.input.reviewRequired);
     await interaction.reply({
