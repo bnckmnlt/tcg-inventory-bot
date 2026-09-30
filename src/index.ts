@@ -155,11 +155,17 @@ async function buildPlan(
 ): Promise<{ catalog: Catalog; plan: IngestionPlan }> {
   const store = await createJsonInventoryStore(inventoryPath);
   let workingCatalog = catalog;
+  const existingKeys = new Set<string>();
+  for (const row of store.list()) {
+    existingKeys.add(row.inventoryId);
+    const sourceLine = row.sourceLine ?? Number(row.inventoryId.match(/-(\d+)$/)?.[1] ?? NaN);
+    if (row.orderId && Number.isInteger(sourceLine) && sourceLine > 0) existingKeys.add(`${row.orderId}:line:${sourceLine}`);
+  }
   let plan = planInvoiceIngestion(
     workingCatalog,
     invoice,
     sourceMessageId,
-    new Set(store.list().map((row) => row.inventoryId)),
+    existingKeys,
     { allowMissingCardNumber: true },
   );
 
@@ -192,7 +198,7 @@ async function buildPlan(
     workingCatalog,
     invoice,
     sourceMessageId,
-    new Set(store.list().map((row) => row.inventoryId)),
+    existingKeys,
     { allowMissingCardNumber: true },
   );
 
@@ -230,30 +236,6 @@ client.on(Events.MessageCreate, async (message: Message) => {
       // the latest persisted inventory, even if the bot has been running for
       // a long time or another process wrote the inventory file.
       const currentInventoryStore = await createJsonInventoryStore(inventoryPath);
-
-      // Order ID is the stable invoice-level idempotency key. Do not require
-      // seller equality: the order ID itself identifies the invoice, and seller
-      // extraction can vary slightly between OCR/model passes.
-      if (invoice.orderId) {
-        const existing = currentInventoryStore.list().filter(
-          (row) => row.orderId === invoice.orderId,
-        );
-
-        if (existing.length > 0) {
-          await message.reply({
-            content: [
-              "ℹ️ **Invoice already stored**",
-              "",
-              `Order ID: ${invoice.orderId}`,
-              `Seller: ${invoice.seller ?? existing[0].seller ?? "Unknown"}`,
-              `Existing inventory records: ${existing.length}`,
-              "",
-              "Nothing was added to inventory.",
-            ].join("\n"),
-          });
-          continue;
-        }
-      }
 
       const catalog = await loadCatalog();
       const sourceMessageId = `DISCORD-${message.id}-${attachment.id}`;

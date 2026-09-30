@@ -61,7 +61,7 @@ function requiredText(value: string | null | undefined, fallback = ""): string {
   return value?.trim() || fallback;
 }
 
-function lineToInventoryInput(line: InvoiceLineItem, inventoryId: string, invoice: InvoiceData, review: { flags: ReviewFlag[]; notes: string[] }): V2InventoryRow {
+function lineToInventoryInput(line: InvoiceLineItem, inventoryId: string, invoice: InvoiceData, sourceLine: number, review: { flags: ReviewFlag[]; notes: string[] }): V2InventoryRow {
   return {
     inventoryId,
     cardName: requiredText(line.productName),
@@ -78,6 +78,7 @@ function lineToInventoryInput(line: InvoiceLineItem, inventoryId: string, invoic
     purchaseDate: invoice.purchaseDate ?? undefined,
     seller: invoice.seller ?? undefined,
     orderId: invoice.orderId ?? undefined,
+    sourceLine,
     reviewRequired: review.flags.length > 0,
     reviewFlags: review.flags.length > 0 ? review.flags : undefined,
     reviewNotes: review.notes.length > 0 ? review.notes : undefined,
@@ -105,7 +106,7 @@ export function planInvoiceIngestion(
     const ingestionKey = `${sourceMessageId}:line:${sourceLine}`;
     const inventoryId = `IMG-${sourceMessageId}-${String(sourceLine).padStart(3, "0")}`;
     const review = reviewMetadataForLine(invoice, sourceLine);
-    const input = lineToInventoryInput(line, inventoryId, invoice, review);
+    const input = lineToInventoryInput(line, inventoryId, invoice, sourceLine, review);
 
     if (!line.productName || !line.setName || (!options.allowMissingCardNumber && !line.cardNumber) || !line.quantity || line.quantity < 1) {
       rows.push({
@@ -120,7 +121,8 @@ export function planInvoiceIngestion(
       return;
     }
 
-    if (existingInventoryIds.has(inventoryId)) {
+    const purchaseKey = invoice.orderId ? `${invoice.orderId}:line:${sourceLine}` : undefined;
+    if (existingInventoryIds.has(inventoryId) || (purchaseKey !== undefined && existingInventoryIds.has(purchaseKey))) {
       rows.push({
         ingestionKey,
         sourceMessageId,
@@ -128,7 +130,7 @@ export function planInvoiceIngestion(
         action: "SKIP",
         state: "EXACT",
         input,
-        reasons: ["This ingestion key already has an inventory ID; safe retry is a no-op."],
+        reasons: ["This invoice line is already recorded; safe retry is a no-op."],
       });
       return;
     }

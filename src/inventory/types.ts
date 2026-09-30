@@ -26,6 +26,7 @@ export interface V2InventoryRow {
   purchaseDate?: string;
   seller?: string;
   orderId?: string;
+  sourceLine?: number;
   skuId?: string;
   resolutionState?: MatchState;
   resolutionReasons?: string[];
