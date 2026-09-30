@@ -15,14 +15,14 @@ export const V2_INVENTORY_HEADERS = [
   "Order ID",
   "Qty Purchased",
   "Unit Cost (₱ each)",
-  "Total Cost",
+  "Total Cost (₱)",
   "Expected Sell Price (₱)",
-  "Avg. Actual Sell Price",
+  "Avg. Actual Sell Price (₱)",
   "Qty Sold",
   "Remaining Qty",
-  "Total Revenue",
+  "Total Revenue (₱)",
   "Cost Sold (FIFO)",
-  "Realized Profit / Loss",
+  "Realized Profit / Loss (₱)",
   "Stock Status",
   "Status Override",
   "Notes",
@@ -60,7 +60,7 @@ function number(value: unknown): number | undefined {
 }
 
 function headerIndex(headers: unknown[]): Map<string, number> {
-  return new Map(headers.map((value, index) => [text(value).toLowerCase(), index]));
+  return new Map(Array.from({ length: headers.length }, (_, index) => [text(headers[index]).toLowerCase(), index] as const));
 }
 
 function valueAt(row: unknown[], indexes: Map<string, number>, header: string): unknown {
@@ -80,23 +80,24 @@ export function parseV2InventorySheet(sheetRows: unknown[][]): V2WorkbookParseRe
     return { rows: [], issues: [{ sourceRow: 1, message: "Inventory sheet is empty." }] };
   }
 
-  const indexes = headerIndex(sheetRows[0]);
+  const headerRowIndex = sheetRows.findIndex((row) => {
+    const indexes = headerIndex(row);
+    return V2_INVENTORY_HEADERS.every((header) => indexes.has(header.toLowerCase()));
+  });
   const issues: V2WorkbookParseIssue[] = [];
-  const missingHeaders = V2_INVENTORY_HEADERS.filter(
-    (header) => !indexes.has(header.toLowerCase()),
-  );
 
-  if (missingHeaders.length) {
+  if (headerRowIndex < 0) {
     return {
       rows: [],
-      issues: [{ sourceRow: 1, message: `Missing V2 Inventory headers: ${missingHeaders.join(", ")}.` }],
+      issues: [{ sourceRow: 1, message: `Missing V2 Inventory headers: ${V2_INVENTORY_HEADERS.join(", ")}.` }],
     };
   }
 
+  const indexes = headerIndex(sheetRows[headerRowIndex]);
   const rows: ParsedV2InventoryRow[] = [];
 
-  sheetRows.slice(1).forEach((raw, offset) => {
-    const sourceRow = offset + 2;
+  sheetRows.slice(headerRowIndex + 1).forEach((raw, offset) => {
+    const sourceRow = headerRowIndex + offset + 2;
     const inventoryId = text(valueAt(raw, indexes, "Inventory ID"));
     if (!inventoryId) return;
 

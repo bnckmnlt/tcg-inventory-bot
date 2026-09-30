@@ -69,15 +69,17 @@ function worksheetRows(path: string, target: string, strings: string[]): unknown
 
   for (const rowMatch of xml.matchAll(/<row\b[^>]*>([\s\S]*?)<\/row>/g)) {
     const values: unknown[] = [];
-    for (const cellMatch of rowMatch[1].matchAll(/<c\b([^>]*)>([\s\S]*?)<\/c>/g)) {
+    for (const cellMatch of rowMatch[1].matchAll(/<c\b([^>]*?)(?:\/>|>([\s\S]*?)<\/c>)/g)) {
       const attrs = cellMatch[1];
-      const body = cellMatch[2];
+      const body = cellMatch[2] ?? "";
       const ref = attrs.match(/r="([A-Z]+\d+)"/i)?.[1] ?? "";
       const index = Math.max(0, columnNumber(ref) - 1);
       const type = attrs.match(/t="([^"]+)"/)?.[1];
-      const formula = tagText(body, "f");
-      const rawValue = tagText(body, "v");
-      const inlineValue = type === "inlineStr" ? tagText(body, "is") : "";
+      const formula = body.match(/<f[^>]*>([\s\S]*?)<\/f>/)?.[1] ?? "";
+      const rawValue = body.match(/<v[^>]*>([\s\S]*?)<\/v>/)?.[1] ?? "";
+      const inlineValue = type === "inlineStr"
+        ? body.match(/<is[^>]*>([\s\S]*?)<\/is>/)?.[1]?.replace(/<[^>]+>/g, "") ?? ""
+        : "";
       let value: unknown = inlineValue || rawValue;
 
       if (type === "s") {

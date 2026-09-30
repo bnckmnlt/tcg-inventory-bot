@@ -49,6 +49,20 @@ async function getJson<T>(baseUrl: string, path: string): Promise<T> {
   return response.json() as Promise<T>;
 }
 
+async function mapWithConcurrency<T, R>(items: T[], concurrency: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let nextIndex = 0;
+  const worker = async () => {
+    while (true) {
+      const index = nextIndex++;
+      if (index >= items.length) return;
+      results[index] = await fn(items[index]);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, worker));
+  return results;
+}
+
 export async function importTCGdex(options: TCGdexImportOptions): Promise<Catalog> {
   const language = options.language ?? "en";
   const conditions = options.conditions ?? ["Near Mint", "Lightly Played", "Moderately Played", "Heavily Played", "Damaged"];
@@ -87,8 +101,13 @@ export async function importTCGdex(options: TCGdexImportOptions): Promise<Catalo
       seenSets.add(set.id);
     }
 
-    for (const brief of set.cards) {
-      const sourceCard = await getJson<TCGdexCard>(baseUrl, "/cards/" + encodeURIComponent(brief.id));
+    const sourceCards = await mapWithConcurrency(
+      set.cards,
+      12,
+      (brief) => getJson<TCGdexCard>(baseUrl, "/cards/" + encodeURIComponent(brief.id)),
+    );
+
+    for (const sourceCard of sourceCards) {
       const catalogCardId = stableId("card", "tcgdex:card:" + sourceCard.name);
       let card = seenCards.get(catalogCardId);
 

@@ -11,7 +11,8 @@
     "test:inventory": "node --import tsx --test src/inventory/*.test.ts",
     "inventory:import": "tsx src/inventory/import-v2-workbook.ts",
     "catalog:import": "tsx src/catalog/import-tcgdex.ts",
-    "catalog:validate": "tsx src/catalog/validate.ts"
+    "catalog:validate": "tsx src/catalog/validate.ts",
+    "catalog:merge": "tsx src/catalog/merge-catalog.ts"
   },
   "dependencies": {
     "@google/genai": "^2.24.0",

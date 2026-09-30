@@ -2,4 +2,6 @@ node_modules/
 .env
 dist/
 data/invoices/
+data/catalog-batch*.json
+src/catalog/inspect-resolver.ts
 credentials/
