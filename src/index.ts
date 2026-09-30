@@ -222,12 +222,17 @@ client.on(Events.MessageCreate, async (message: Message) => {
 
       const invoice = await extractInvoice(filePath);
 
-      // Order IDs are the stable invoice-level idempotency key. This catches the
-      // same invoice being uploaded again as a new Discord message/attachment.
+      // Reload from disk for every invoice so duplicate detection always sees
+      // the latest persisted inventory, even if the bot has been running for
+      // a long time or another process wrote the inventory file.
+      const currentInventoryStore = await createJsonInventoryStore(inventoryPath);
+
+      // Order ID is the stable invoice-level idempotency key. Do not require
+      // seller equality: the order ID itself identifies the invoice, and seller
+      // extraction can vary slightly between OCR/model passes.
       if (invoice.orderId) {
-        const existing = inventoryStore.list().filter((row) =>
-          row.orderId === invoice.orderId &&
-          (!invoice.seller || row.seller === invoice.seller),
+        const existing = currentInventoryStore.list().filter(
+          (row) => row.orderId === invoice.orderId,
         );
 
         if (existing.length > 0) {
