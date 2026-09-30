@@ -9,6 +9,8 @@ import {
   GatewayIntentBits,
   Message,
   ModalBuilder,
+  StringSelectMenuBuilder,
+  StringSelectMenuOptionBuilder,
   TextInputBuilder,
   TextInputStyle,
 } from "discord.js";
@@ -26,6 +28,7 @@ import { persistInvoicePlanToWorkbookSafely } from "./inventory/workbook-persist
 import {
   createPendingTransaction,
   getPendingTransaction,
+  listPendingTransactions,
   removePendingTransaction,
   savePendingTransaction,
 } from "./transaction.js";
@@ -183,6 +186,36 @@ function reviewButtons(transactionId: string, canConfirm: boolean, needsReview: 
   return buttons;
 }
 
+function reviewActionButtons(transaction: NonNullable<ReturnType<typeof getPendingTransaction>>) {
+  const needsReview = transaction.plan.rows.some((row) => row.input.reviewRequired);
+  return reviewButtons(
+    transaction.id,
+    transaction.plan.insertable > 0 && !needsReview,
+    needsReview,
+  );
+}
+
+function buildPendingReviewMenu() {
+  const transactions = listPendingTransactions().slice(0, 25);
+  const menu = new StringSelectMenuBuilder()
+    .setCustomId("invoice:review-select")
+    .setPlaceholder("Select a pending invoice");
+
+  for (const transaction of transactions) {
+    const invoice = transaction.invoice;
+    const label = (invoice.orderId || invoice.seller || ("Invoice " + transaction.id.slice(0, 8))).slice(0, 100);
+    const description = ((invoice.purchaseDate || "Unknown date") + " • " + transaction.plan.rows.length + " line(s) • " + transaction.id.slice(0, 8)).slice(0, 100);
+    menu.addOptions(
+      new StringSelectMenuOptionBuilder()
+        .setLabel(label)
+        .setDescription(description)
+        .setValue(transaction.id),
+    );
+  }
+
+  return new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(menu);
+}
+
 function buildCardNumberModal(
   transactionId: string,
   rowIndex: number,
@@ -316,9 +349,20 @@ async function buildPlan(
   return { catalog: workingCatalog, plan };
 }
 
-client.once(Events.ClientReady, (readyClient) => {
-  console.log(`Logged in as ${readyClient.user.tag}`);
-  console.log(`Inventory persistence: ${inventoryPath}`);
+client.once(Events.ClientReady, async (readyClient) => {
+  console.log("Logged in as " + readyClient.user.tag);
+  console.log("Inventory persistence: " + inventoryPath);
+
+  for (const guild of readyClient.guilds.cache.values()) {
+    const commands = await readyClient.application.commands.fetch({ guildId: guild.id });
+    const existing = commands.find((command) => command.name === "review");
+    const commandData = {
+      name: "review",
+      description: "Open a pending invoice review",
+    };
+    if (existing) await existing.edit(commandData);
+    else await readyClient.application.commands.create(commandData, guild.id);
+  }
 });
 
 client.on(Events.MessageCreate, async (message: Message) => {
@@ -374,6 +418,40 @@ client.on(Events.MessageCreate, async (message: Message) => {
 });
 
 client.on(Events.InteractionCreate, async (interaction) => {
+  if (interaction.isChatInputCommand() && interaction.commandName === "review") {
+    const transactions = listPendingTransactions();
+    if (transactions.length === 0) {
+      await interaction.reply({ content: "There are no pending invoice reviews.", ephemeral: true });
+      return;
+    }
+
+    const shown = transactions.slice(0, 25);
+    await interaction.reply({
+      content: shown.length < transactions.length
+        ? "Select a pending invoice below. Showing the first " + shown.length + " of " + transactions.length + "."
+        : "Select a pending invoice below.",
+      components: [buildPendingReviewMenu()],
+      ephemeral: true,
+    });
+    return;
+  }
+
+  if (interaction.isStringSelectMenu() && interaction.customId === "invoice:review-select") {
+    const transactionId = interaction.values[0];
+    const transaction = getPendingTransaction(transactionId);
+    if (!transaction) {
+      await interaction.update({ content: "That invoice is no longer pending.", components: [] });
+      return;
+    }
+
+    await interaction.update({
+      content: "Pending invoice " + transaction.id.slice(0, 8),
+      embeds: buildReviewEmbeds(transaction.invoice, transaction.plan, transaction.id),
+      components: [reviewActionButtons(transaction)],
+    });
+    return;
+  }
+
   if (interaction.isModalSubmit()) {
     const [prefix, field, transactionId, rowIndexText] = interaction.customId.split(":");
     if (prefix !== "invoice" || field !== "card-number" || !transactionId || rowIndexText === undefined) return;

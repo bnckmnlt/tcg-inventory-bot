@@ -68,6 +68,10 @@ export function getPendingTransaction(id: string): PendingTransaction | undefine
   return pendingTransactions.get(id);
 }
 
+export function listPendingTransactions(): PendingTransaction[] {
+  return [...pendingTransactions.values()];
+}
+
 export function removePendingTransaction(id: string): void {
   if (!pendingTransactions.delete(id)) return;
   savePendingTransactions();
