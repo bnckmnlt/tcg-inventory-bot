@@ -10,6 +10,7 @@ import {
   Message,
 } from "discord.js";
 import path from "node:path";
+import { existsSync } from "node:fs";
 import { downloadInvoice } from "./invoice.js";
 import { extractInvoice } from "./extract.js";
 import { enrichCardInput, mergeCatalog } from "./catalog/enrichment.js";
@@ -17,6 +18,7 @@ import { TCGdexRuntime } from "./catalog/runtime.js";
 import type { Catalog } from "./catalog/types.js";
 import { planInvoiceIngestion, type IngestionPlan } from "./inventory/ingest.js";
 import { createJsonInventoryStore } from "./inventory/json-store.js";
+import { persistInvoicePlanToWorkbookSafely } from "./inventory/workbook-persistence.js";
 import {
   createPendingTransaction,
   getPendingTransaction,
@@ -31,6 +33,9 @@ if (!invoiceChannelId) throw new Error("INVOICE_CHANNEL_ID is missing from .env"
 
 const catalogPath = path.resolve("data/catalog.json");
 const inventoryPath = path.resolve("data/inventory.json");
+const workbookPath = process.env.INVENTORY_WORKBOOK_PATH
+  ? path.resolve(process.env.INVENTORY_WORKBOOK_PATH)
+  : undefined;
 
 const client = new Client({
   intents: [
@@ -146,6 +151,41 @@ async function loadCatalog(): Promise<Catalog> {
 async function saveCatalog(catalog: Catalog): Promise<void> {
   const { writeFile } = await import("node:fs/promises");
   await writeFile(catalogPath, JSON.stringify(catalog, null, 2) + "\n", "utf8");
+}
+
+function workbookRateForInvoice(invoice: Awaited<ReturnType<typeof extractInvoice>>): number | undefined {
+  if (invoice.currency === "PHP") return 1;
+  if (invoice.currency === "USD") {
+    const raw = process.env.WORKBOOK_USD_TO_PHP_RATE;
+    if (!raw) return undefined;
+    const rate = Number(raw);
+    if (!Number.isFinite(rate) || rate <= 0) throw new Error("WORKBOOK_USD_TO_PHP_RATE must be a positive number.");
+    return rate;
+  }
+  throw new Error(`No workbook currency conversion is configured for invoice currency ${invoice.currency ?? "unknown"}.`);
+}
+
+async function persistWorkbookIfConfigured(
+  invoice: Awaited<ReturnType<typeof extractInvoice>>,
+  plan: IngestionPlan,
+): Promise<string | null> {
+  if (!workbookPath) return null;
+  if (!existsSync(workbookPath)) throw new Error(`Configured workbook does not exist: ${workbookPath}`);
+  if (plan.insertable === 0) return `Workbook unchanged — no new inventory lines to insert.`;
+
+  const rate = workbookRateForInvoice(invoice);
+  if (rate === undefined) {
+    throw new Error(
+      "Workbook persistence is configured, but WORKBOOK_USD_TO_PHP_RATE is missing. " +
+      "The workbook stores PHP costs and the invoice is in USD; refusing to guess the FX rate.",
+    );
+  }
+
+  const result = persistInvoicePlanToWorkbookSafely(workbookPath, plan, invoice, {
+    unitCostRate: rate,
+    sourceCurrency: invoice.currency ?? undefined,
+  });
+  return `Workbook updated: ${result.inserted} inserted, ${result.skipped} skipped, ${result.pendingReview} pending.`;
 }
 
 async function buildPlan(
@@ -312,6 +352,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     await interaction.deferUpdate();
 
     try {
+      const workbookStatus = await persistWorkbookIfConfigured(transaction.invoice, transaction.plan);
       const currentInventoryStore = await createJsonInventoryStore(inventoryPath);
       const applied = await currentInventoryStore.apply(transaction.plan.rows);
       removePendingTransaction(transactionId);
@@ -330,7 +371,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
             ? "All valid purchases were recorded. Rows with missing minimum fields still need extraction correction. Review flags on recorded rows remain attached to those inventory lots."
             : "All invoice rows were recorded. Any review flags remain attached to the corresponding inventory lots for later correction.",
           "",
-          `Inventory file: ${inventoryPath}`,
+          `Inventory JSON file: ${inventoryPath}`,
+          workbookStatus ?? "Workbook persistence is not enabled; set INVENTORY_WORKBOOK_PATH to enable it.",
           "Google Sheets persistence is intentionally not connected yet.",
         ].join("\n"),
         components: [],
