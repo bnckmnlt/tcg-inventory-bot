@@ -10,13 +10,15 @@ export function normalizeText(value: string | undefined): string {
 
 export function normalizeSetName(value: string | undefined): string {
   const normalized = normalizeText(value)
-    .replace(/^(?:sv\d{2}(?:\.\d+)?|sv|sve|swsh\d{2}|me\d{2}|me):\s*/, "");
+    .replace(/^(?:sv\d{2}(?:\.\d+)?|sv|sve|swsh\d{2}|swsh|sm\d{2}|sm|xy\d{2}|xy|me\d{2}|me)\s*[:\-]\s*/, "");
   const aliases: Record<string, string> = {
     "scarlet violet promo": "svp black star promos",
     "mega evolution promo": "mep black star promos",
     "scarlet & violet energies": "scarlet & violet energy",
     "sve scarlet & violet energies": "scarlet & violet energy",
     "sword and shield base set": "sword & shield",
+    "trading card game classic": "tcg classic",
+    "ex power keepers": "power keepers",
   };
   return aliases[normalized] ?? normalized;
 }
@@ -43,7 +45,9 @@ export function normalizeVariant(value: string | undefined): string {
   if (!normalized || normalized === "normal") return "Normal";
   const aliases: Record<string, string> = {
     holofoil: "holo",
+    "reverse holo": "reverse",
     "reverse holofoil": "reverse",
+    "cracked ice holo": "Normal",
   };
   return aliases[normalized] ?? normalized;
 }
@@ -56,6 +60,7 @@ export function normalizeVariant(value: string | undefined): string {
 export function normalizeInventoryCardName(value: string | undefined): string {
   const normalized = normalizeText(value);
   return normalized
-    .replace(/\s*\((?:full art|cosmos holo|pokeball(?: patt(?:ern)?\.?)?|masterball(?: patt(?:ern)?)?|energy symbol patt(?:ern)?\.?|clb|clc|clv)\)\s*$/i, "")
+    .replace(/\s*\((?:full art|cosmos holo|cracked ice holo|pokeball(?: patt(?:ern)?\.?)?|masterball(?: patt(?:ern)?)?|energy symbol patt(?:ern)?\.?|clb|clc|clv)\)\s*$/i, "")
+    .replace(/\s+-\s+\d+\s*\/\s*\d+\s*$/i, "")
     .trim();
 }

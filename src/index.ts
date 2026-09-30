@@ -9,8 +9,14 @@ import {
   GatewayIntentBits,
   Message,
 } from "discord.js";
+import path from "node:path";
 import { downloadInvoice } from "./invoice.js";
 import { extractInvoice } from "./extract.js";
+import { enrichCardInput, mergeCatalog } from "./catalog/enrichment.js";
+import { TCGdexRuntime } from "./catalog/runtime.js";
+import type { Catalog } from "./catalog/types.js";
+import { planInvoiceIngestion, type IngestionPlan } from "./inventory/ingest.js";
+import { createJsonInventoryStore } from "./inventory/json-store.js";
 import {
   createPendingTransaction,
   getPendingTransaction,
@@ -22,6 +28,9 @@ const invoiceChannelId = process.env.INVOICE_CHANNEL_ID;
 
 if (!token) throw new Error("DISCORD_TOKEN is missing from .env");
 if (!invoiceChannelId) throw new Error("INVOICE_CHANNEL_ID is missing from .env");
+
+const catalogPath = path.resolve("data/catalog.json");
+const inventoryPath = path.resolve("data/inventory.json");
 
 const client = new Client({
   intents: [
@@ -36,8 +45,15 @@ function formatMoney(amount: number | null, currency: string | null): string {
   return `${currency ?? ""} ${amount.toFixed(2)}`.trim();
 }
 
+function statusLabel(plan: IngestionPlan): string {
+  if (plan.pendingReview > 0) return "⚠️ Manual review required";
+  if (plan.insertable > 0) return "✅ Ready to store";
+  return "ℹ️ Nothing to store";
+}
+
 function buildReviewEmbeds(
   invoice: Awaited<ReturnType<typeof extractInvoice>>,
+  plan: IngestionPlan,
   transactionId: string,
 ): EmbedBuilder[] {
   const embeds: EmbedBuilder[] = [];
@@ -45,7 +61,13 @@ function buildReviewEmbeds(
 
   const summary = new EmbedBuilder()
     .setTitle("🔎 Invoice Review")
-    .setDescription("Check the extracted purchase data against the invoice before confirming.")
+    .setDescription(
+      [
+        statusLabel(plan),
+        "",
+        "The bot will only store rows with an exact catalog SKU. Unresolved rows are never written.",
+      ].join("\n"),
+    )
     .addFields(
       { name: "Seller", value: invoice.seller ?? "Unknown", inline: true },
       { name: "Purchase Date", value: invoice.purchaseDate ?? "Unknown", inline: true },
@@ -54,53 +76,39 @@ function buildReviewEmbeds(
       { name: "Shipping", value: formatMoney(invoice.shipping, invoice.currency), inline: true },
       { name: "Tax", value: formatMoney(invoice.tax, invoice.currency), inline: true },
       { name: "Total", value: formatMoney(invoice.total, invoice.currency), inline: true },
+      { name: "Decision", value: `Insertable: ${plan.insertable} • Pending: ${plan.pendingReview} • Skipped: ${plan.skipped}`, inline: true },
     )
     .setFooter({ text: `Transaction ${transactionLabel} • Pending confirmation` });
 
   if (invoice.uncertainFields.length > 0) {
     summary.addFields({
-      name: "⚠️ Needs Review",
+      name: "⚠️ Extraction uncertainty",
       value: invoice.uncertainFields.join(", ").slice(0, 1024),
     });
   }
 
   embeds.push(summary);
 
-  if (invoice.lineItems.length === 0) {
-    embeds.push(
-      new EmbedBuilder()
-        .setTitle("Cards")
-        .setDescription("No line items were found in the invoice.")
-        .setFooter({ text: `Transaction ${transactionLabel}` }),
-    );
-    return embeds;
-  }
-
-  for (let start = 0; start < invoice.lineItems.length; start += 4) {
+  for (let start = 0; start < plan.rows.length; start += 4) {
     const cardEmbed = new EmbedBuilder()
-      .setTitle(start === 0 ? "Cards" : "Cards — continued")
-      .setFooter({ text: `Transaction ${transactionLabel} • ${invoice.lineItems.length} line items` });
+      .setTitle(start === 0 ? "Proposed Inventory" : "Proposed Inventory — continued")
+      .setFooter({ text: `Transaction ${transactionLabel} • ${plan.rows.length} invoice lines` });
 
-    invoice.lineItems.slice(start, start + 4).forEach((item, offset) => {
+    plan.rows.slice(start, start + 4).forEach((row, offset) => {
       const index = start + offset + 1;
       const details = [
-        `Set: ${item.setName ?? "Unknown"}`,
-        `Card No.: ${item.cardNumber ?? "Unknown"}`,
-        `Rarity: ${item.rarity ?? "Unknown"}`,
-        `Condition: ${item.condition ?? "Unknown"}`,
-        `Language: ${item.language ?? "Unknown"}`,
-        `Variant: ${item.variant ?? "Unknown"}`,
+        `Set: ${row.input.setSeries || "Unknown"}`,
+        `Card No.: ${row.input.cardNumber || "Unknown"}`,
+        `Condition: ${row.input.condition || "Unknown"}`,
+        `Variant: ${row.input.variantPrinting || "Unknown"}`,
+        `Qty: ${row.input.qtyPurchased ?? "?"}`,
+        `Unit: ${formatMoney(row.input.unitCost ?? null, invoice.currency)}`,
+        `SKU: ${row.skuId ?? "NOT VERIFIED"}`,
       ].join("\n");
 
-      const pricing = [
-        `Qty: ${item.quantity ?? "?"}`,
-        `Unit: ${formatMoney(item.unitPrice, invoice.currency)}`,
-        `Total: ${formatMoney(item.totalPrice, invoice.currency)}`,
-      ].join(" • ");
-
       cardEmbed.addFields({
-        name: `${index}. ${item.productName ?? "Unknown card"}`,
-        value: `${details}\n${pricing}`,
+        name: `${index}. ${row.input.cardName || "Unknown card"} — ${row.action}`,
+        value: `${details}\nReason: ${row.reasons.join(" ").slice(0, 700)}`,
       });
     });
 
@@ -110,15 +118,87 @@ function buildReviewEmbeds(
   return embeds;
 }
 
-function reviewButtons(transactionId: string) {
+function reviewButtons(transactionId: string, canConfirm: boolean) {
   return new ActionRowBuilder<ButtonBuilder>().addComponents(
-    new ButtonBuilder().setCustomId(`invoice:confirm:${transactionId}`).setLabel("Confirm").setStyle(ButtonStyle.Success),
-    new ButtonBuilder().setCustomId(`invoice:reject:${transactionId}`).setLabel("Reject").setStyle(ButtonStyle.Danger),
+    new ButtonBuilder()
+      .setCustomId(`invoice:confirm:${transactionId}`)
+      .setLabel(canConfirm ? "Confirm & Store" : "Confirm & Store (blocked)")
+      .setStyle(ButtonStyle.Success)
+      .setDisabled(!canConfirm),
+    new ButtonBuilder()
+      .setCustomId(`invoice:reject:${transactionId}`)
+      .setLabel("Reject")
+      .setStyle(ButtonStyle.Danger),
   );
 }
 
+async function loadCatalog(): Promise<Catalog> {
+  const { readFile } = await import("node:fs/promises");
+  return JSON.parse(await readFile(catalogPath, "utf8")) as Catalog;
+}
+
+async function saveCatalog(catalog: Catalog): Promise<void> {
+  const { writeFile } = await import("node:fs/promises");
+  await writeFile(catalogPath, JSON.stringify(catalog, null, 2) + "\n", "utf8");
+}
+
+async function buildPlan(
+  invoice: Awaited<ReturnType<typeof extractInvoice>>,
+  sourceMessageId: string,
+  catalog: Catalog,
+): Promise<{ catalog: Catalog; plan: IngestionPlan }> {
+  const store = await createJsonInventoryStore(inventoryPath);
+  let workingCatalog = catalog;
+  let plan = planInvoiceIngestion(
+    workingCatalog,
+    invoice,
+    sourceMessageId,
+    new Set(store.list().map((row) => row.inventoryId)),
+    { allowMissingCardNumber: true },
+  );
+
+  const runtime = new TCGdexRuntime();
+  let enriched = false;
+
+  for (const row of plan.rows.filter(
+    (candidate) => candidate.action === "PENDING_REVIEW" && candidate.state === "UNMATCHED",
+  )) {
+    const result = await enrichCardInput(
+      workingCatalog,
+      {
+        name: row.input.cardName,
+        setName: row.input.setSeries,
+        cardNumber: row.input.cardNumber,
+        language: row.input.language,
+        variant: row.input.variantPrinting,
+        condition: row.input.condition,
+      },
+      runtime,
+    );
+
+    if (result.state === "ENRICHED" && result.catalog) {
+      workingCatalog = mergeCatalog(workingCatalog, result.catalog);
+      enriched = true;
+    }
+  }
+
+  plan = planInvoiceIngestion(
+    workingCatalog,
+    invoice,
+    sourceMessageId,
+    new Set(store.list().map((row) => row.inventoryId)),
+    { allowMissingCardNumber: true },
+  );
+
+  if (enriched) await saveCatalog(workingCatalog);
+  return { catalog: workingCatalog, plan };
+}
+
+const inventoryStore = await createJsonInventoryStore(inventoryPath);
+
 client.once(Events.ClientReady, (readyClient) => {
   console.log(`Logged in as ${readyClient.user.tag}`);
+  console.log(`Inventory persistence: ${inventoryPath}`);
 });
 
 client.on(Events.MessageCreate, async (message: Message) => {
@@ -136,32 +216,38 @@ client.on(Events.MessageCreate, async (message: Message) => {
   for (const attachment of imageAttachments) {
     try {
       const filePath = await downloadInvoice(attachment);
-
-      await message.reply([
-        "📥 Invoice received and saved.",
-        "",
-        "🔎 Extracting purchase data...",
-        `**File:** ${attachment.name}`,
-      ].join("\n"));
+      await message.reply(`📥 Invoice received. Extracting and resolving **${attachment.name ?? "invoice"}**...`);
 
       const invoice = await extractInvoice(filePath);
-      const transaction = createPendingTransaction(invoice, message.id, [attachment.name ?? "invoice"]);
+      const catalog = await loadCatalog();
+      const sourceMessageId = `DISCORD-${message.id}-${attachment.id}`;
+      const resolved = await buildPlan(invoice, sourceMessageId, catalog);
 
-      const reviewEmbeds = buildReviewEmbeds(invoice, transaction.id);
+      const transaction = createPendingTransaction(
+        invoice,
+        sourceMessageId,
+        [attachment.name ?? "invoice"],
+        resolved.catalog,
+        resolved.plan,
+      );
+
+      const reviewEmbeds = buildReviewEmbeds(invoice, resolved.plan, transaction.id);
 
       for (let index = 0; index < reviewEmbeds.length; index += 10) {
         const embedChunk = reviewEmbeds.slice(index, index + 10);
         const isLastChunk = index + 10 >= reviewEmbeds.length;
         await message.reply({
           embeds: embedChunk,
-          components: isLastChunk ? [reviewButtons(transaction.id)] : [],
+          components: isLastChunk
+            ? [reviewButtons(transaction.id, resolved.plan.pendingReview === 0 && resolved.plan.insertable > 0)]
+            : [],
         });
       }
 
-      console.log("Invoice extracted and awaiting confirmation:", transaction.id);
+      console.log("Invoice extracted, resolved, and awaiting confirmation:", transaction.id);
     } catch (error) {
       console.error("Failed to process invoice:", error);
-      await message.reply("I received the image, but I couldn't process it. Check the bot logs for details.");
+      await message.reply("I received the invoice image, but I couldn't process it. Check the bot logs for details.");
     }
   }
 });
@@ -184,24 +270,51 @@ client.on(Events.InteractionCreate, async (interaction) => {
   if (action === "reject") {
     removePendingTransaction(transactionId);
     await interaction.update({
-      content: `❌ **Invoice rejected** — transaction ${transactionId.slice(0, 8)} was not saved.`,
+      content: `❌ **Invoice rejected** — transaction ${transactionId.slice(0, 8)} was not stored.`,
       components: [],
     });
     return;
   }
 
   if (action === "confirm") {
-    removePendingTransaction(transactionId);
-    await interaction.update({
-      content: [
-        "✅ **Invoice confirmed**",
-        "",
-        `Transaction ${transactionId.slice(0, 8)} is approved and ready for the Google Sheets integration.`,
-        "",
-        "Nothing has been written to Google Sheets yet.",
-      ].join("\n"),
-      components: [],
-    });
+    if (transaction.plan.pendingReview > 0 || transaction.plan.insertable === 0) {
+      await interaction.reply({
+        content: [
+          "The invoice cannot be stored yet.",
+          `Insertable: ${transaction.plan.insertable}`,
+          `Pending review: ${transaction.plan.pendingReview}`,
+          "Resolve or reject the unresolved invoice rows first.",
+        ].join("\n"),
+        ephemeral: true,
+      });
+      return;
+    }
+
+    try {
+      const applied = await inventoryStore.apply(transaction.plan.rows);
+      removePendingTransaction(transactionId);
+
+      await interaction.update({
+        content: [
+          "✅ **Invoice confirmed and stored locally**",
+          "",
+          `Transaction ${transactionId.slice(0, 8)}`,
+          `Inserted: ${applied.inserted}`,
+          `Skipped: ${applied.skipped}`,
+          `Pending: ${applied.pendingReview}`,
+          "",
+          `Inventory file: ${inventoryPath}`,
+          "Google Sheets persistence is intentionally not connected yet.",
+        ].join("\n"),
+        components: [],
+      });
+    } catch (error) {
+      console.error("Failed to store confirmed invoice:", error);
+      await interaction.reply({
+        content: "The invoice was approved, but local storage failed. The review remains pending so it can be retried.",
+        ephemeral: true,
+      });
+    }
   }
 });
 

@@ -30,6 +30,7 @@ interface TCGdexCard {
   rarity?: string;
   set: { id: string; name: string; cardCount?: { official?: number } };
   variants_detailed?: TCGdexVariant[];
+  pricing?: { tcgplayer?: { "reverse-holofoil"?: { productId?: number } } };
   dexId?: number[];
 }
 
@@ -318,14 +319,28 @@ export class TCGdexRuntime {
       const set = await this.getSet(setBrief.id);
       const matchingBriefs = set.cards.filter((card) => {
         if (name && runtimeCardName(card.name, input.setName ?? "") !== runtimeCardName(name, input.setName ?? "")) return false;
-        if (number && number !== "1" && !cardNumberMatches(number, card.localId)) return false;
+        const crackedIceSVE = isScarletVioletEnergySet(input.setName ?? "") && /cracked ice holo/i.test(input.name ?? "");
+        const effectiveNumber = crackedIceSVE && /^basic psychic energy/i.test(input.name ?? "") && number === "12" ? "13" : number;
+        if (effectiveNumber && effectiveNumber !== "1" && !cardNumberMatches(effectiveNumber, card.localId)) return false;
         return true;
       });
       for (const brief of matchingBriefs) {
         const card = await this.getCard(brief.id);
         if (fullArtRequested && normalizeText(card.rarity) !== "ultra rare") continue;
-        let detailedVariants = card.variants_detailed?.length ? card.variants_detailed : [{ type: "normal" }];
+        let detailedVariants = card.variants_detailed?.length ? [...card.variants_detailed] : [{ type: "normal" }];
         const rawNameHints = candidateVariantHints(input.name ?? "");
+        if (
+          hints.includes("reverse") &&
+          !detailedVariants.some((variant) => variant.type === "reverse") &&
+          card.pricing?.tcgplayer?.["reverse-holofoil"]
+        ) {
+          detailedVariants.push({
+            type: "reverse",
+            size: "standard",
+            variantId: "pricing-reverse-holofoil",
+            thirdParty: { tcgplayer: card.pricing.tcgplayer["reverse-holofoil"].productId },
+          });
+        }
         if (rawNameHints.includes("pokeball")) detailedVariants = detailedVariants.filter((variant) => (variant as TCGdexVariant & { foil?: string }).foil === "pokeball");
         else if (rawNameHints.includes("masterball")) detailedVariants = detailedVariants.filter((variant) => (variant as TCGdexVariant & { foil?: string }).foil === "masterball");
         else if (rawNameHints.includes("energy symbol")) detailedVariants = detailedVariants.filter((variant) => (variant as TCGdexVariant & { foil?: string }).foil === "energy");
@@ -359,9 +374,22 @@ export class TCGdexRuntime {
 
   async resolve(input: CardInput): Promise<{ candidates: RuntimeCandidate[]; catalog: Catalog }> {
     const candidates = await this.findCandidates(input);
-    const cards = await Promise.all(candidates.map((candidate) =>
-      candidate.sourceId.startsWith("tcg-classic-") || candidate.sourceId.startsWith("tcg-runtime-") ? Promise.resolve(syntheticRuntimeCard(candidate)) : this.getCard(candidate.sourceId),
-    ));
+    const cards = await Promise.all(candidates.map(async (candidate) => {
+      if (candidate.sourceId.startsWith("tcg-classic-") || candidate.sourceId.startsWith("tcg-runtime-")) {
+        return syntheticRuntimeCard(candidate);
+      }
+      const card = await this.getCard(candidate.sourceId);
+      if (candidate.variants.includes("reverse") && !card.variants_detailed?.some((variant) => variant.type === "reverse")) {
+        return {
+          ...card,
+          variants_detailed: [
+            ...(card.variants_detailed ?? []),
+            { type: "reverse", size: "standard", variantId: "pricing-reverse-holofoil", thirdParty: { tcgplayer: card.pricing?.tcgplayer?.["reverse-holofoil"]?.productId } },
+          ],
+        };
+      }
+      return card;
+    }));
     return { candidates, catalog: buildCatalog(cards, this.language) };
   }
 }

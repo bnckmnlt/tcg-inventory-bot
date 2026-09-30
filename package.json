@@ -12,6 +12,8 @@
     "inventory:import": "tsx src/inventory/import-v2-workbook.ts",
     "inventory:review": "tsx src/inventory/review-mapping.ts",
     "inventory:review:runtime": "tsx src/inventory/review-mapping-runtime.ts",
+    "inventory:image": "tsx src/inventory/card-image-ingest.ts",
+    "inventory:invoice": "tsx src/inventory/invoice-ingest.ts",
     "catalog:import": "tsx src/catalog/import-tcgdex.ts",
     "catalog:validate": "tsx src/catalog/validate.ts",
     "catalog:merge": "tsx src/catalog/merge-catalog.ts"

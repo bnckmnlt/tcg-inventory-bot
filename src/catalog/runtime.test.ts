@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { TCGdexRuntime } from "./runtime.js";
+import { resolveCardInput } from "./resolver.js";
 
 test("runtime catalog resolves only the requested set/card data", async () => {
   const requests: string[] = [];
@@ -58,12 +59,20 @@ test("runtime maps SVE Basic Energy names to Scarlet & Violet Energy", async () 
     "/sets": [{ id: "sve", name: "Scarlet & Violet Energy" }],
     "/sets/sve": {
       id: "sve", name: "Scarlet & Violet Energy",
-      cards: [{ id: "sve-004", localId: "004", name: "Lightning Energy" }],
+      cards: [
+        { id: "sve-012", localId: "012", name: "Lightning Energy" },
+        { id: "sve-013", localId: "013", name: "Psychic Energy" },
+      ],
     },
-    "/cards/sve-004": {
-      category: "Energy", id: "sve-004", localId: "004", name: "Lightning Energy",
+    "/cards/sve-012": {
+      category: "Energy", id: "sve-012", localId: "012", name: "Lightning Energy",
       set: { id: "sve", name: "Scarlet & Violet Energy" },
-      variants_detailed: [{ type: "holo", size: "standard" }],
+      variants_detailed: [{ type: "normal", size: "standard" }],
+    },
+    "/cards/sve-013": {
+      category: "Energy", id: "sve-013", localId: "013", name: "Psychic Energy",
+      set: { id: "sve", name: "Scarlet & Violet Energy" },
+      variants_detailed: [{ type: "normal", size: "standard" }],
     },
   };
   const runtime = new TCGdexRuntime({
@@ -76,9 +85,72 @@ test("runtime maps SVE Basic Energy names to Scarlet & Violet Energy", async () 
     },
   });
 
-  const result = await runtime.resolve({ name: "Basic Lightning Energy", setName: "SVE: Scarlet & Violet Energies", cardNumber: "1", variant: "Holofoil", language: "English", condition: "Near Mint" });
+  for (const [name, number, expectedNumber] of [["Basic Lightning Energy", "012", "012"], ["Basic Psychic Energy", "12", "013"]] as const) {
+    const result = await runtime.resolve({
+      name: `${name} (Cracked Ice Holo)`,
+      setName: "SVE: Scarlet & Violet Energies",
+      cardNumber: number,
+      variant: "Cracked Ice Holo",
+      language: "English",
+      condition: "Near Mint",
+    });
+    assert.equal(result.candidates.length, 1);
+    assert.equal(result.candidates[0].cardNumber, expectedNumber);
+
+    const resolved = resolveCardInput(result.catalog, {
+      name: `${name} (Cracked Ice Holo)`,
+      setName: "SVE: Scarlet & Violet Energies",
+      cardNumber: number,
+      variant: "Cracked Ice Holo",
+      language: "English",
+      condition: "Near Mint",
+    });
+    assert.equal(resolved.state, "EXACT");
+    assert.equal(resolved.variant?.variantLabel, "normal");
+  }
+});
+
+test("runtime uses TCGdex reverse-holofoil pricing when variant details omit the reverse treatment", async () => {
+  const payloads: Record<string, unknown> = {
+    "/sets": [{ id: "xy12", name: "Evolutions" }],
+    "/sets/xy12": {
+      id: "xy12", name: "Evolutions",
+      cards: [{ id: "xy12-47", localId: "47", name: "Gastly" }],
+    },
+    "/cards/xy12-47": {
+      category: "Pokemon", id: "xy12-47", localId: "47", name: "Gastly",
+      rarity: "Common", set: { id: "xy12", name: "Evolutions" },
+      variants_detailed: [{ type: "normal", size: "standard", variantId: "generated" }],
+      pricing: { tcgplayer: { "reverse-holofoil": { productId: 124061 } } },
+    },
+  };
+  const runtime = new TCGdexRuntime({
+    fetch: async (url) => {
+      const target = typeof url === "string" ? url : url instanceof URL ? url.href : url.url;
+      const path = new URL(target).pathname.replace("/v2/en", "");
+      const body = payloads[path];
+      if (body === undefined) return new Response("not found", { status: 404 });
+      return new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+    },
+  });
+
+  const result = await runtime.resolve({
+    name: "Gastly",
+    setName: "XY - Evolutions",
+    language: "English",
+    variant: "Reverse Holo",
+    condition: "Near Mint",
+  });
   assert.equal(result.candidates.length, 1);
-  assert.equal(result.candidates[0].cardNumber, "004");
+  assert.deepEqual(result.candidates[0].variants, ["normal", "reverse"]);
+  const resolved = resolveCardInput(result.catalog, {
+    name: "Gastly",
+    setName: "XY - Evolutions",
+    language: "English",
+    variant: "Reverse Holo",
+    condition: "Near Mint",
+  }, { allowMissingCardNumber: true });
+  assert.equal(resolved.state, "EXACT");
 });
 
 test("runtime resolves TCG Classic deck-specific printings without TCGdex set endpoints", async () => {

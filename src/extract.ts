@@ -29,7 +29,7 @@ export interface InvoiceData {
 }
 
 const geminiApiKey = process.env.GEMINI_API_KEY;
-const model = process.env.GEMINI_MODEL ?? "gemini-2.5-flash-lite";
+const model = process.env.GEMINI_MODEL ?? "gemini-3.5-flash-lite";
 
 if (!geminiApiKey) {
   throw new Error("GEMINI_API_KEY is missing from .env");
@@ -125,15 +125,26 @@ export async function extractInvoice(filePath: string): Promise<InvoiceData> {
           {
             text: [
               "Extract the purchase information from this TCGPlayer invoice image.",
+              "Treat the invoice as a structured table and preserve the relationship between columns on each row.",
+              "The table columns are Items, Details, Price, and Quantity.",
+              "Items contains the purchased product name; directly underneath that name is the set name for the same row.",
+              "Details contains the rarity on one line and the condition/printing information on the next line for that same row.",
+              "Price contains the unit price for that row only. Quantity contains the quantity for that row only.",
+              "Do not shift values between neighboring rows or columns. Each lineItem must correspond to exactly one visible table row.",
               "Return only information that is actually visible in the invoice.",
               "Do not guess missing values. Use null for missing values.",
               "Keep prices as numbers without currency symbols.",
               "Use the invoice's currency code when visible; otherwise use null.",
               "Use an ISO date (YYYY-MM-DD) when the purchase date is clear.",
-              "For each purchased card, preserve the exact product name shown.",
-              "Extract the set name, card number, rarity, condition, language, and printing/variant when visible.",
-              "For variant, capture things such as 1st Edition, Unlimited, Holo, Reverse Holo, Foil, Promo, etc. when explicitly shown.",
-              "If a field is difficult to read or ambiguous, add its field name to uncertainFields."
+              "For each row, preserve the exact product name shown in the Items column. The product name may itself contain identifiers such as Full Art, Secret, EX, illustration-related wording, Poké Ball pattern, or a card number.",
+              "Extract setName from the text directly beneath the product name, not from a different row.",
+              "If a card number such as 025/165 is visibly included in the item text, extract it as cardNumber; otherwise use null.",
+              "Extract rarity from the rarity line in Details, separately from condition.",
+              "If Details says something like 'Near Mint Holofoil', set condition to 'Near Mint' and variant to 'Holo' when that is the printing treatment being described.",
+              "Do not treat the condition word itself as a variant. Preserve explicit printing treatments such as Holo, Reverse Holo, 1st Edition, Unlimited, Promo, Full Art, Poké Ball pattern, or Master Ball pattern when supported by the row.",
+              "Extract quantity only from the Quantity column and unitPrice only from the Price column.",
+              "Calculate totalPrice as unitPrice multiplied by quantity only when both values are clearly present and the arithmetic agrees with the invoice; otherwise use the visible row total if one exists or null.",
+              "If a field is difficult to read or ambiguous, add its field name and row number to uncertainFields."
             ].join("\n"),
           },
           {

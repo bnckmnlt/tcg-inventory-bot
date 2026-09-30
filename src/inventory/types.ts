@@ -10,6 +10,12 @@ export interface V2InventoryRow {
   language: string;
   variantPrinting: string;
   remainingQty: number;
+  qtyPurchased?: number;
+  unitCost?: number;
+  totalCost?: number;
+  purchaseDate?: string;
+  seller?: string;
+  orderId?: string;
 }
 
 export interface ResolvedInventoryLot {
