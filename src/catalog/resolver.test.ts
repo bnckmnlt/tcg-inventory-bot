@@ -61,6 +61,19 @@ test("keeps Basic Psychic Energy identified by printing number", () => {
   assert.equal(result.sku?.skuId, "sku-psychic-151-207-nm");
 });
 
+test("strips known V2 printing suffixes from the card name", () => {
+  const result = resolveCardInput(sampleCatalog, {
+    name: "Drifloon (Cosmos Holo)",
+    setName: "Example Set C",
+    cardNumber: "050/100",
+    language: "English",
+    variant: "Normal",
+    condition: "Near Mint",
+  });
+  assert.equal(result.state, "EXACT");
+  assert.equal(result.variant?.variantLabel, "Normal");
+});
+
 test("flags a name conflict instead of silently accepting it", () => {
   const result = resolveCardInput(sampleCatalog, {
     name: "Drifblim",

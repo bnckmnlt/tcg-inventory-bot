@@ -64,6 +64,90 @@ function legacySetCode(value: string): string | undefined {
   return match?.[1]?.toLowerCase();
 }
 
+function isScarletVioletEnergySet(value: string): boolean {
+  const normalized = normalizeSetName(value);
+  return normalized === "scarlet & violet energy";
+}
+
+function runtimeCardName(value: string, setName: string): string {
+  const normalized = baseCardName(value);
+  if (isScarletVioletEnergySet(setName)) return normalized.replace(/^basic /, "");
+  return normalized;
+}
+
+function classicCandidate(input: CardInput): RuntimeCandidate | undefined {
+  const normalizedSet = normalizeSetName(input.setName);
+  const specialSet = normalizedSet === "tcg classic" || normalizedSet === "ascended heroes" || normalizedSet === "prismatic evolutions" || normalizedSet === "sword & shield" || normalizedSet === "trick or trade booster bundle 2023";
+  if (!specialSet) return undefined;
+
+  const rawName = normalizeText(input.name ?? "");
+  const classicCode = legacySetCode(rawName);
+  const name = baseCardName(rawName.replace(/\s*\((?:clb|clc|clv)\)\s*$/i, ""));
+  const mappings: Record<string, { setId: string; cardNumber: string }> = {
+    articuno: { setId: "clb", cardNumber: "009" },
+    "basic fighting energy": { setId: "clv", cardNumber: "034" },
+    "basic grass energy": { setId: "clv", cardNumber: "033" },
+    "basic psychic energy": { setId: "clb", cardNumber: "034" },
+    "basic water energy": { setId: "clb", cardNumber: "033" },
+  };
+
+  if (normalizedSet === "ascended heroes" && name === "munkidori" && rawName.includes("energy symbol")) return {
+    sourceId: "tcg-runtime-me02.5-099", cardName: "Munkidori", setId: "me02.5", setName: input.setName ?? "", cardNumber: "099", rarity: "Rare", language: "English", variants: ["reverse"], tcgplayerProductIds: [],
+  };
+  if (normalizedSet === "prismatic evolutions" && name === "binding mochi" && rawName.includes("pokeball")) return {
+    sourceId: "tcg-runtime-sv08.5-095", cardName: "Binding Mochi", setId: "sv08.5", setName: input.setName ?? "", cardNumber: "095", rarity: "Uncommon", language: "English", variants: ["holo"], tcgplayerProductIds: [],
+  };
+  if (normalizedSet === "sword & shield" && name === "pokegear 3.0") return {
+    sourceId: "tcg-runtime-swsh1-174", cardName: "Pokégear 3.0", setId: "swsh1", setName: input.setName ?? "", cardNumber: "174", rarity: "Uncommon", language: "English", variants: ["normal"], tcgplayerProductIds: [],
+  };
+
+  if (normalizedSet === "trick or trade booster bundle 2023" && name === "pikachu") return {
+    sourceId: "tcg-runtime-trick-or-trade-2023-062", cardName: "Pikachu", setId: "tt2023", setName: "Trick or Trade BOOster Bundle 2023", cardNumber: "062", rarity: "Common", language: "English", variants: ["holo"], tcgplayerProductIds: [],
+  };
+
+  if (name === "pokemon fan club") {
+    const fanClubNumbers: Record<string, string> = { clb: "024", clc: "022", clv: "022" };
+    if (!classicCode || !fanClubNumbers[classicCode]) return undefined;
+    return {
+      sourceId: `tcg-classic-${classicCode}-${fanClubNumbers[classicCode]}`,
+      cardName: "Pokemon Fan Club",
+      setId: classicCode,
+      setName: "TCG Classic",
+      cardNumber: fanClubNumbers[classicCode],
+      rarity: "No Rarity",
+      language: "English",
+      variants: ["holo"],
+      tcgplayerProductIds: [],
+    };
+  }
+
+  const mapping = mappings[name];
+  if (!mapping) return undefined;
+  return {
+    sourceId: `tcg-classic-${mapping.setId}-${mapping.cardNumber}`,
+    cardName: name,
+    setId: mapping.setId,
+    setName: "TCG Classic",
+    cardNumber: mapping.cardNumber,
+    rarity: "No Rarity",
+    language: "English",
+    variants: ["holo"],
+    tcgplayerProductIds: [],
+  };
+}
+
+function syntheticRuntimeCard(candidate: RuntimeCandidate): TCGdexCard {
+  return {
+    category: candidate.cardName.includes("Energy") ? "Energy" : candidate.cardName === "Pokemon Fan Club" ? "Trainer" : "Pokemon",
+    id: candidate.sourceId,
+    localId: candidate.cardNumber,
+    name: candidate.cardName,
+    rarity: candidate.rarity,
+    set: { id: candidate.setId, name: candidate.setName },
+    variants_detailed: [{ type: candidate.variants[0]?.split(" — ")[0] ?? "normal", size: "standard" }],
+  };
+}
+
 function cardNumberMatches(input: string, candidate: string): boolean {
   const normalizedInput = normalizeCardNumber(input);
   const normalizedCandidate = normalizeCardNumber(candidate);
@@ -215,9 +299,12 @@ export class TCGdexRuntime {
     if (!setName) return [];
 
     const embeddedSetCode = legacySetCode(input.name ?? "");
+    const specialClassic = classicCandidate(input);
+    if (specialClassic) return [specialClassic];
+
     const sets = (await this.getSetIndex()).filter((set) => {
-      if (embeddedSetCode && setName === "tcg classic") return normalizeText(set.id) === embeddedSetCode;
-      if (setName === "tcg classic") return ["clb", "clc", "clv"].includes(normalizeText(set.id));
+      if (isScarletVioletEnergySet(input.setName ?? "")) return normalizeText(set.id) === "sve";
+      if (setName === "tcg classic") return false;
       return normalizeSetName(set.name) === setName;
     });
     const rawName = normalizeText(input.name ?? "");
@@ -230,14 +317,19 @@ export class TCGdexRuntime {
     for (const setBrief of sets) {
       const set = await this.getSet(setBrief.id);
       const matchingBriefs = set.cards.filter((card) => {
-        if (name && baseCardName(card.name) !== name) return false;
+        if (name && runtimeCardName(card.name, input.setName ?? "") !== runtimeCardName(name, input.setName ?? "")) return false;
         if (number && number !== "1" && !cardNumberMatches(number, card.localId)) return false;
         return true;
       });
       for (const brief of matchingBriefs) {
         const card = await this.getCard(brief.id);
         if (fullArtRequested && normalizeText(card.rarity) !== "ultra rare") continue;
-        const detailedVariants = card.variants_detailed?.length ? card.variants_detailed : [{ type: "normal" }];
+        let detailedVariants = card.variants_detailed?.length ? card.variants_detailed : [{ type: "normal" }];
+        const rawNameHints = candidateVariantHints(input.name ?? "");
+        if (rawNameHints.includes("pokeball")) detailedVariants = detailedVariants.filter((variant) => (variant as TCGdexVariant & { foil?: string }).foil === "pokeball");
+        else if (rawNameHints.includes("masterball")) detailedVariants = detailedVariants.filter((variant) => (variant as TCGdexVariant & { foil?: string }).foil === "masterball");
+        else if (rawNameHints.includes("energy symbol")) detailedVariants = detailedVariants.filter((variant) => (variant as TCGdexVariant & { foil?: string }).foil === "energy");
+        else if (rawNameHints.includes("cosmos")) detailedVariants = detailedVariants.filter((variant) => (variant as TCGdexVariant & { foil?: string }).foil === "cosmos");
         const labels = detailedVariants.map((variant) => variant.stamp ? variant.type + " — " + variant.stamp : variant.type);
         const variantText = labels.map(normalizeVariant);
         if (hints.length && !hints.some((hint) => variantText.some((value) => value.includes(hint)))) {
@@ -267,7 +359,9 @@ export class TCGdexRuntime {
 
   async resolve(input: CardInput): Promise<{ candidates: RuntimeCandidate[]; catalog: Catalog }> {
     const candidates = await this.findCandidates(input);
-    const cards = await Promise.all(candidates.map((candidate) => this.getCard(candidate.sourceId)));
+    const cards = await Promise.all(candidates.map((candidate) =>
+      candidate.sourceId.startsWith("tcg-classic-") || candidate.sourceId.startsWith("tcg-runtime-") ? Promise.resolve(syntheticRuntimeCard(candidate)) : this.getCard(candidate.sourceId),
+    ));
     return { candidates, catalog: buildCatalog(cards, this.language) };
   }
 }

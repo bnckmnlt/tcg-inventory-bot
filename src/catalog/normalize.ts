@@ -15,6 +15,8 @@ export function normalizeSetName(value: string | undefined): string {
     "scarlet violet promo": "svp black star promos",
     "mega evolution promo": "mep black star promos",
     "scarlet & violet energies": "scarlet & violet energy",
+    "sve scarlet & violet energies": "scarlet & violet energy",
+    "sword and shield base set": "sword & shield",
   };
   return aliases[normalized] ?? normalized;
 }
@@ -44,4 +46,16 @@ export function normalizeVariant(value: string | undefined): string {
     "reverse holofoil": "reverse",
   };
   return aliases[normalized] ?? normalized;
+}
+
+/**
+ * V2 inventory sometimes embeds a physical printing/pattern description in
+ * the card name. These suffixes are not part of the catalog card identity;
+ * the actual variant is represented separately by `variant`.
+ */
+export function normalizeInventoryCardName(value: string | undefined): string {
+  const normalized = normalizeText(value);
+  return normalized
+    .replace(/\s*\((?:full art|cosmos holo|pokeball(?: patt(?:ern)?\.?)?|masterball(?: patt(?:ern)?)?|energy symbol patt(?:ern)?\.?|clb|clc|clv)\)\s*$/i, "")
+    .trim();
 }

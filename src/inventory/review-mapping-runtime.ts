@@ -27,7 +27,9 @@ for (const row of localRows.filter((candidate) => candidate.state !== "EXACT")) 
   const result = await runtime.resolve(placeholder ? input : { ...input, name: undefined });
   const resolved = placeholder && result.candidates.length === 1
     ? resolveCardInput(result.catalog, { ...row.input, cardNumber: result.candidates[0].cardNumber })
-    : resolveCardInput(result.catalog, row.input);
+    : placeholder && result.candidates.length > 1
+      ? resolveCardInput(result.catalog, { ...row.input, cardNumber: undefined })
+      : resolveCardInput(result.catalog, row.input);
   rows.push({
     inventoryId: row.inventoryId,
     state: resolved.state,

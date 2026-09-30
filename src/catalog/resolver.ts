@@ -1,5 +1,5 @@
 import type { Catalog, CardInput, ResolveResult, Printing, Variant, Card, Sku } from "./types.js";
-import { normalizeCardNumber, normalizeLanguage, normalizeSetName, normalizeText, normalizeVariant } from "./normalize.js";
+import { normalizeCardNumber, normalizeInventoryCardName, normalizeLanguage, normalizeSetName, normalizeText, normalizeVariant } from "./normalize.js";
 
 function variantsFor(catalog: Catalog, printingId: string): Variant[] {
   return catalog.variants.filter((variant) => variant.printingId === printingId);
@@ -15,7 +15,7 @@ function candidateRows(catalog: Catalog, printings: Printing[]) {
 
 export function resolveCardInput(catalog: Catalog, input: CardInput): ResolveResult {
   const reasons: string[] = [];
-  const name = normalizeText(input.name);
+  const name = normalizeInventoryCardName(input.name);
   const setName = normalizeSetName(input.setName);
   const setCode = normalizeText(input.setCode);
   const number = normalizeCardNumber(input.cardNumber);

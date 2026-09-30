@@ -52,3 +52,39 @@ test("runtime catalog resolves only the requested set/card data", async () => {
   assert.equal(result.candidates[0].cardNumber, "199");
   assert.deepEqual(requests, ["/sets", "/sets/sv03.5", "/cards/sv03.5-199"]);
 });
+
+test("runtime maps SVE Basic Energy names to Scarlet & Violet Energy", async () => {
+  const payloads: Record<string, unknown> = {
+    "/sets": [{ id: "sve", name: "Scarlet & Violet Energy" }],
+    "/sets/sve": {
+      id: "sve", name: "Scarlet & Violet Energy",
+      cards: [{ id: "sve-004", localId: "004", name: "Lightning Energy" }],
+    },
+    "/cards/sve-004": {
+      category: "Energy", id: "sve-004", localId: "004", name: "Lightning Energy",
+      set: { id: "sve", name: "Scarlet & Violet Energy" },
+      variants_detailed: [{ type: "holo", size: "standard" }],
+    },
+  };
+  const runtime = new TCGdexRuntime({
+    fetch: async (url) => {
+      const target = typeof url === "string" ? url : url instanceof URL ? url.href : url.url;
+      const path = new URL(target).pathname.replace("/v2/en", "");
+      const body = payloads[path];
+      if (body === undefined) return new Response("not found", { status: 404 });
+      return new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+    },
+  });
+
+  const result = await runtime.resolve({ name: "Basic Lightning Energy", setName: "SVE: Scarlet & Violet Energies", cardNumber: "1", variant: "Holofoil", language: "English", condition: "Near Mint" });
+  assert.equal(result.candidates.length, 1);
+  assert.equal(result.candidates[0].cardNumber, "004");
+});
+
+test("runtime resolves TCG Classic deck-specific printings without TCGdex set endpoints", async () => {
+  const runtime = new TCGdexRuntime({ fetch: async () => new Response("should not fetch", { status: 500 }) });
+  const result = await runtime.resolve({ name: "Pokemon Fan Club (CLC)", setName: "TCG Classic", cardNumber: "1", variant: "Holofoil", language: "English", condition: "Near Mint" });
+  assert.equal(result.candidates.length, 1);
+  assert.equal(result.candidates[0].sourceId, "tcg-classic-clc-022");
+  assert.equal(result.candidates[0].cardNumber, "022");
+});

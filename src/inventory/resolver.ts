@@ -87,19 +87,41 @@ export async function resolveInventoryRowsRuntime(
     const runtimeResult = await runtime.resolve(lookupInput);
 
     if (placeholder) {
+      if (runtimeResult.candidates.length === 1) {
+        const candidate = runtimeResult.candidates[0];
+        const inferred = resolveCardInput(runtimeResult.catalog, {
+          ...input,
+          cardNumber: candidate.cardNumber,
+        });
+        if (inferred.state === "EXACT" && inferred.sku) {
+          resolved.push({
+            inventoryId: row.inventoryId,
+            input,
+            remainingQty: row.remainingQty,
+            state: "EXACT",
+            sku: inferred.sku,
+            reasons: ["Resolved automatically from the unique TCGdex set/name candidate; V2 card number was a placeholder."],
+          });
+          continue;
+        }
+      }
+
       resolved.push({
         inventoryId: row.inventoryId,
         input,
         remainingQty: row.remainingQty,
         state: "INCOMPLETE",
-        reasons: runtimeResult.candidates.length === 1
-          ? ["Card number is a known V2 placeholder and requires manual mapping."]
-          : [
-              "Card number is a known V2 placeholder and requires manual mapping.",
-              runtimeResult.candidates.length === 0
-                ? "No TCGdex candidate matched the supplied set/name."
-                : "Multiple TCGdex candidates matched the supplied set/name.",
-            ],
+        reasons: runtimeResult.candidates.length === 0
+          ? ["Card number is a known V2 placeholder and no TCGdex candidate matched the supplied set/name."]
+          : runtimeResult.candidates.length > 1
+            ? [
+                "Card number is a known V2 placeholder and multiple TCGdex candidates matched the supplied set/name.",
+                "Manual mapping is required to choose the card printing.",
+              ]
+            : [
+                "Card number is a known V2 placeholder and the unique TCGdex candidate could not resolve to an exact SKU.",
+                ...resolveCardInput(runtimeResult.catalog, { ...input, cardNumber: runtimeResult.candidates[0].cardNumber }).reasons,
+              ],
       });
       continue;
     }
