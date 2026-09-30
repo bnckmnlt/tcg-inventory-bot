@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import AdmZip from "adm-zip";
 import { copyFileSync, existsSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -194,7 +194,9 @@ function updateWorkbookDefinedNames(source: string, count: number): void {
 }
 
 function packDirectory(directory: string, outputPath: string): void {
-  execFileSync("zip", ["-qr", outputPath, "."], { cwd: directory });
+  const zip = new AdmZip();
+  zip.addLocalFolder(directory);
+  zip.writeZip(outputPath);
 }
 
 export function appendInventoryRowsToWorkbook(
@@ -213,7 +215,8 @@ export function appendInventoryRowsToWorkbook(
 
   const tempRoot = mkdtempSync(join(tmpdir(), "tcg-inventory-workbook-"));
   const unpacked = join(tempRoot, "xlsx");
-  execFileSync("unzip", ["-q", sourceWorkbookPath, "-d", unpacked]);
+  const zip = new AdmZip(sourceWorkbookPath);
+  zip.extractAllTo(unpacked, true);
   try {
     updateInventorySheet(unpacked, rows, options);
     updateWorkbookDefinedNames(unpacked, rows.length);
