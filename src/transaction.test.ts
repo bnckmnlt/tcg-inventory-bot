@@ -227,6 +227,91 @@ test("runs the full invoice continuation lifecycle without creating a second tra
   }, continuationPlan, invoice), /DUPLICATE_INVOICE_PAGE/);
 });
 
+test("integrates 16 -> 18 -> 11 -> reupload-16 without attaching a duplicate continuation", () => {
+  const invoice16 = createPendingTransaction(
+    { ...transaction().invoice, orderId: "FLOW-16" },
+    "flow-16",
+    ["invoice-16.jpg"],
+    sampleCatalog,
+    emptyPlan(),
+    {
+      id: "flow-16-page-1",
+      sourceMessageId: "flow-16",
+      attachmentName: "invoice-16.jpg",
+      receivedAt: "2026-10-01T04:00:00.000Z",
+      fingerprint: "flow-16-file-v1",
+      contentFingerprint: "flow-16-content",
+      documentFingerprint: "flow-16-document",
+      lineCount: 16,
+    },
+  );
+  setTransactionStatus(invoice16, "PENDING_REVIEW");
+
+  // The later 18-card invoice is a separate invoice. It is reviewed now and stored.
+  const invoice18 = createPendingTransaction(
+    { ...transaction().invoice, orderId: "FLOW-18" },
+    "flow-18",
+    ["invoice-18.jpg"],
+    sampleCatalog,
+    { rows: [], insertable: 18, pendingReview: 0, skipped: 0 },
+    {
+      id: "flow-18-page-1",
+      sourceMessageId: "flow-18",
+      attachmentName: "invoice-18.jpg",
+      receivedAt: "2026-10-01T04:01:00.000Z",
+      fingerprint: "flow-18-file",
+      contentFingerprint: "flow-18-content",
+      documentFingerprint: "flow-18-document",
+      lineCount: 18,
+    },
+  );
+  setTransactionStatus(invoice18, "PENDING_REVIEW");
+  setTransactionStatus(invoice18, "STORED");
+
+  // The 11-card invoice is reviewed later and then rejected. It must remain a separate transaction.
+  const invoice11 = createPendingTransaction(
+    { ...transaction().invoice, orderId: "FLOW-11" },
+    "flow-11",
+    ["invoice-11.jpg"],
+    sampleCatalog,
+    { rows: [], insertable: 11, pendingReview: 0, skipped: 0 },
+    {
+      id: "flow-11-page-1",
+      sourceMessageId: "flow-11",
+      attachmentName: "invoice-11.jpg",
+      receivedAt: "2026-10-01T04:02:00.000Z",
+      fingerprint: "flow-11-file",
+      contentFingerprint: "flow-11-content",
+      documentFingerprint: "flow-11-document",
+      lineCount: 11,
+    },
+  );
+  setTransactionStatus(invoice11, "PENDING_REVIEW");
+  setTransactionStatus(invoice11, "REJECTED");
+
+  assert.equal(invoice16.status, "PENDING_REVIEW");
+  assert.equal(invoice16.pages.length, 1);
+  assert.equal(invoice18.pages.length, 1);
+  assert.equal(invoice11.pages.length, 1);
+  assert.equal(listContinuationTargets().some((item) => item.id === invoice11.id), false);
+  assert.equal(listPendingTransactions().some((item) => item.id === invoice16.id), true);
+  assert.equal(listPendingTransactions().some((item) => item.id === invoice18.id), false);
+  assert.equal(listPendingTransactions().some((item) => item.id === invoice11.id), false);
+
+  // Re-uploading the original 16-card invoice has a different file fingerprint,
+  // but the same document fingerprint. It must be recognized as a duplicate before
+  // continuation selection can occur.
+  assert.equal(findTransactionByPageFingerprint("flow-16-file-reencoded"), undefined);
+  const duplicateMatches = findTransactionsByPageDocumentFingerprint("flow-16-document");
+  assert.deepEqual(duplicateMatches.map((item) => item.id), [invoice16.id]);
+  assert.equal(duplicateMatches[0].pages.length, 1);
+  assert.equal(duplicateMatches[0].plan.insertable, 0);
+
+  // The duplicate upload must not mutate the pending invoice into a two-page continuation.
+  assert.equal(invoice16.status, "PENDING_REVIEW");
+  assert.equal(invoice16.pages.length, 1);
+});
+
 test("detects a reuploaded stored page by document fingerprint", () => {
   const stored = createPendingTransaction(
     { ...transaction().invoice, orderId: "DOC-FINGERPRINT-001" },
