@@ -462,7 +462,16 @@ async function persistGoogleSheetsIfConfigured(
 
   if (rows.length === 0) return "Google Sheets unchanged — no new inventory lines to insert.";
 
-  const result = await appendInventoryRowsDirectToGoogleSheets(rows);
+  // invoicePlanToWorkbookRows keeps the source unit cost so the XLSX
+  // persistence layer can apply the conversion and record the FX note.
+  // Google Sheets receives already-persisted PHP values directly, so convert
+  // the Unit Cost here as well; Total Cost is already converted above.
+  const googleRows = rows.map((row) => ({
+    ...row,
+    unitCost: (row.unitCost ?? 0) * rate,
+  }));
+
+  const result = await appendInventoryRowsDirectToGoogleSheets(googleRows);
   return `Google Sheets updated: ${result.inserted} inserted, ${result.skipped} already present.`;
 }
 

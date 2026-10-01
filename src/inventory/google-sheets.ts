@@ -217,7 +217,9 @@ export async function syncWorkbookInventoryToGoogleSheets(workbookPath: string):
 
   const existing = await existingInventoryIds(token, config.spreadsheetId, sheetName);
   const pending = parsed.rows.filter((row) => !existing.has(row.inventoryId));
-  if (pending.length > 0) await backupGoogleSheetTab(token, config.spreadsheetId, sheetName);
+  if (pending.length > 0 && process.env.GOOGLE_SHEETS_BACKUP_ON_WRITE === "true") {
+    await backupGoogleSheetTab(token, config.spreadsheetId, sheetName);
+  }
   await ensureHeaderRow(token, config.spreadsheetId, sheetName);
   const inserted = await appendRows(token, config.spreadsheetId, sheetName, pending);
 
@@ -293,7 +295,9 @@ export async function appendParsedInventoryRowsToGoogleSheets(
   const sheetName = await verifySheetName(token, config.spreadsheetId, config.sheetName);
   const existing = await existingInventoryIds(token, config.spreadsheetId, sheetName);
   const pending = rows.filter((row) => !existing.has(row.inventoryId));
-  if (pending.length > 0) await backupGoogleSheetTab(token, config.spreadsheetId, sheetName);
+  if (pending.length > 0 && process.env.GOOGLE_SHEETS_BACKUP_ON_WRITE === "true") {
+    await backupGoogleSheetTab(token, config.spreadsheetId, sheetName);
+  }
   await ensureHeaderRow(token, config.spreadsheetId, sheetName);
   const inserted = await appendRows(token, config.spreadsheetId, sheetName, pending);
 
