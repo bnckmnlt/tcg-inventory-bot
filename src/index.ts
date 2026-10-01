@@ -379,6 +379,7 @@ function buildCardNumberModal(
   cardName: string,
   setName: string,
   rarity: string,
+  variant: string,
   currentValue: string,
 ) {
   const input = new TextInputBuilder()
@@ -396,7 +397,7 @@ function buildCardNumberModal(
 
   return new ModalBuilder()
     .setCustomId(`invoice:card-number:${transactionId}:${rowIndex}`)
-    .setTitle(`Resolve: ${cardName} — ${rarity} — ${setName}`.slice(0, 45))
+    .setTitle(`${cardName} — ${setName} — ${rarity}/${variant}`.slice(0, 45))
     .addComponents(new ActionRowBuilder<TextInputBuilder>().addComponents(input));
 }
 
@@ -1051,6 +1052,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       row.input.cardName || "Card",
       row.input.setSeries || "Unknown set",
       row.input.rarity || "Unknown rarity",
+      row.input.variantPrinting || "Unknown variant",
       row.input.cardNumber || "1",
     ));
     return;
