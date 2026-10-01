@@ -20,6 +20,7 @@ export interface InvoicePage {
   receivedAt: string;
   fingerprint: string;
   contentFingerprint?: string;
+  documentFingerprint?: string;
   lineCount: number;
 }
 
@@ -30,6 +31,7 @@ export interface PendingContinuation {
   receivedAt: string;
   fingerprint: string;
   contentFingerprint?: string;
+  documentFingerprint?: string;
   invoice: InvoiceData;
   catalog: Catalog;
   plan: IngestionPlan;
@@ -210,6 +212,13 @@ export function findTransactionByPageFingerprint(fingerprint: string): PendingTr
   if (!fingerprint) return undefined;
   return [...pendingTransactions.values()].find((transaction) =>
     transaction.pages.some((page) => page.fingerprint === fingerprint),
+  );
+}
+
+export function findTransactionsByPageDocumentFingerprint(documentFingerprint: string): PendingTransaction[] {
+  if (!documentFingerprint) return [];
+  return [...pendingTransactions.values()].filter((transaction) =>
+    transaction.pages.some((page) => page.documentFingerprint === documentFingerprint),
   );
 }
 

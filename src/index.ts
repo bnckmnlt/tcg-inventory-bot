@@ -44,6 +44,7 @@ import {
   appendInvoicePage,
   findTransactionByOrderId,
   findTransactionByPageFingerprint,
+  findTransactionsByPageDocumentFingerprint,
   setTransactionStatus,
   type InvoicePage,
 } from "./transaction.js";
@@ -119,6 +120,32 @@ function invoicePageContentFingerprint(
     unitPrice: line.unitPrice ?? null,
     totalPrice: line.totalPrice ?? null,
   })));
+  return createHash("sha256").update(normalized).digest("hex");
+}
+
+function invoicePageDocumentFingerprint(
+  invoice: Awaited<ReturnType<typeof extractInvoice>>,
+): string {
+  const normalized = JSON.stringify({
+    seller: invoice.seller?.trim() ?? null,
+    purchaseDate: invoice.purchaseDate?.trim() ?? null,
+    subtotal: invoice.subtotal ?? null,
+    shipping: invoice.shipping ?? null,
+    tax: invoice.tax ?? null,
+    total: invoice.total ?? null,
+    currency: invoice.currency ?? null,
+    lineItems: invoice.lineItems.map((line) => ({
+      productName: line.productName?.trim() ?? null,
+      setName: line.setName?.trim() ?? null,
+      cardNumber: line.cardNumber?.trim() ?? null,
+      condition: line.condition?.trim() ?? null,
+      language: line.language?.trim() ?? null,
+      variant: line.variant?.trim() ?? null,
+      quantity: line.quantity ?? null,
+      unitPrice: line.unitPrice ?? null,
+      totalPrice: line.totalPrice ?? null,
+    })),
+  });
   return createHash("sha256").update(normalized).digest("hex");
 }
 
@@ -539,10 +566,20 @@ client.on(Events.MessageCreate, async (message: Message) => {
       const sourceMessageId = `DISCORD-${message.id}-${attachment.id}`;
       const fingerprint = await invoicePageFingerprint(invoice, filePath);
       const contentFingerprint = invoicePageContentFingerprint(invoice);
+      const documentFingerprint = invoicePageDocumentFingerprint(invoice);
       const existingPage = findTransactionByPageFingerprint(fingerprint);
       if (existingPage) {
         await message.reply(`This invoice page was already processed for **${existingPage.invoice.orderId || existingPage.id.slice(0, 8)}**. No cards were added.`);
         continue;
+      }
+      const documentIdentityAvailable = Boolean(invoice.seller || invoice.purchaseDate || invoice.total !== null || invoice.subtotal !== null);
+      if (documentIdentityAvailable) {
+        const documentMatches = findTransactionsByPageDocumentFingerprint(documentFingerprint);
+        if (documentMatches.length === 1) {
+          const duplicateTransaction = documentMatches[0];
+          await message.reply(`This invoice page matches an already processed page for **${duplicateTransaction.invoice.orderId || duplicateTransaction.id.slice(0, 8)}**. No cards were added.`);
+          continue;
+        }
       }
       const existingTransaction = getPendingTransactionBySourceMessageId(sourceMessageId);
       if (existingTransaction) {
@@ -572,6 +609,7 @@ client.on(Events.MessageCreate, async (message: Message) => {
           receivedAt: new Date().toISOString(),
           fingerprint,
           contentFingerprint,
+          documentFingerprint,
           lineCount: invoice.lineItems.length,
         };
         matchingOrderTransaction.catalog = continuationPlan.catalog;
@@ -604,6 +642,7 @@ client.on(Events.MessageCreate, async (message: Message) => {
           receivedAt: new Date().toISOString(),
           fingerprint,
           contentFingerprint,
+          documentFingerprint,
           invoice,
           catalog: resolved.catalog,
           plan: resolved.plan,
@@ -639,6 +678,7 @@ client.on(Events.MessageCreate, async (message: Message) => {
           receivedAt: new Date().toISOString(),
           fingerprint: await invoicePageFingerprint(invoice, filePath),
           contentFingerprint,
+          documentFingerprint,
           lineCount: invoice.lineItems.length,
         },
       );
@@ -797,6 +837,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         receivedAt: continuation.receivedAt,
         fingerprint: continuation.fingerprint,
         contentFingerprint: continuation.contentFingerprint,
+        documentFingerprint: continuation.documentFingerprint,
         lineCount: continuation.invoice.lineItems.length,
       };
 

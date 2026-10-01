@@ -14,6 +14,7 @@ const {
   createPendingTransaction,
   findTransactionByOrderId,
   findTransactionByPageFingerprint,
+  findTransactionsByPageDocumentFingerprint,
   getPendingContinuation,
   listPendingTransactions,
   listContinuationTargets,
@@ -224,6 +225,36 @@ test("runs the full invoice continuation lifecycle without creating a second tra
     fingerprint: "e2e-fingerprint-2",
     lineCount: 1,
   }, continuationPlan, invoice), /DUPLICATE_INVOICE_PAGE/);
+});
+
+test("detects a reuploaded stored page by document fingerprint", () => {
+  const stored = createPendingTransaction(
+    { ...transaction().invoice, orderId: "DOC-FINGERPRINT-001" },
+    "doc-page-1",
+    ["doc-page-1.jpg"],
+    sampleCatalog,
+    emptyPlan(),
+    {
+      id: "doc-page-1",
+      sourceMessageId: "doc-page-1",
+      attachmentName: "doc-page-1.jpg",
+      receivedAt: "2026-10-01T03:00:00.000Z",
+      fingerprint: "doc-file-original",
+      contentFingerprint: "doc-content-001",
+      documentFingerprint: "doc-document-001",
+      lineCount: 16,
+    },
+  );
+  setTransactionStatus(stored, "STORED");
+
+  const matches = findTransactionsByPageDocumentFingerprint("doc-document-001");
+  assert.deepEqual(matches.map((item) => item.id), [stored.id]);
+  assert.equal(findTransactionByPageFingerprint("doc-file-reencoded"), undefined);
+
+  assert.equal(
+    findTransactionsByPageDocumentFingerprint("doc-document-missing").length,
+    0,
+  );
 });
 
 test("allows a stored invoice to be reopened by a continuation", () => {
