@@ -19,6 +19,7 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { copyFile, mkdir, readFile, writeFile } from "node:fs/promises";
+import { readV2InventoryWorkbook } from "./inventory/read-xlsx.js";
 import { createInventoryBackup } from "./inventory/backup.js";
 import { downloadInvoice } from "./invoice.js";
 import { extractInvoice } from "./extract.js";
@@ -401,6 +402,78 @@ function buildCardNumberModal(
     .addComponents(new ActionRowBuilder<TextInputBuilder>().addComponents(input));
 }
 
+function buildSaleSearchModal() {
+  const input = new TextInputBuilder()
+    .setCustomId("sale-search")
+    .setLabel("Search inventory")
+    .setStyle(TextInputStyle.Short)
+    .setPlaceholder("Card name, set, number, rarity, SKU, etc.")
+    .setRequired(false)
+    .setMaxLength(100);
+
+  return new ModalBuilder()
+    .setCustomId("sale:search")
+    .setTitle("Find Inventory for Sale")
+    .addComponents(new ActionRowBuilder<TextInputBuilder>().addComponents(input));
+}
+
+function buildSaleInventoryMenu(rows: ReturnType<typeof readV2InventoryWorkbook>["rows"], query: string) {
+  const normalizedQuery = query.trim().toLowerCase();
+  const tokens = normalizedQuery.split(/\s+/).filter(Boolean);
+  const available = rows
+    .filter((row) => row.remainingQty > 0)
+    .map((row) => {
+      const haystack = [
+        row.inventoryId,
+        row.rawCardKey,
+        row.cardName,
+        row.setSeries,
+        row.cardNumber,
+        row.rarity,
+        row.condition,
+        row.language,
+        row.variantPrinting,
+      ].filter(Boolean).join(" ").toLowerCase();
+      const matches = tokens.every((token) => haystack.includes(token));
+      const exactBoost = haystack.includes(normalizedQuery) ? 100 : 0;
+      const nameBoost = row.cardName.toLowerCase().includes(normalizedQuery) ? 50 : 0;
+      return { row, matches, score: exactBoost + nameBoost };
+    })
+    .filter((candidate) => candidate.matches)
+    .sort((a, b) => b.score - a.score || a.row.cardName.localeCompare(b.row.cardName))
+    .slice(0, 25)
+    .map((candidate) => candidate.row);
+
+  const menu = new StringSelectMenuBuilder()
+    .setCustomId("sale:inventory-select")
+    .setPlaceholder(available.length ? "Select the inventory record to sell" : "No matching inventory");
+
+  for (const row of available) {
+    const rarity = row.rarity || "Rarity not set";
+    const variant = row.variantPrinting || "Normal";
+    const label = `${row.cardName} — ${row.cardNumber}`.slice(0, 100);
+    const description = [
+      row.setSeries,
+      rarity,
+      variant,
+      row.condition,
+      `Available: ${row.remainingQty}`,
+    ].join(" • ").slice(0, 100);
+
+    menu.addOptions(
+      new StringSelectMenuOptionBuilder()
+        .setLabel(label)
+        .setDescription(description)
+        .setValue(row.inventoryId),
+    );
+  }
+
+  return {
+    available,
+    row: new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(menu),
+  };
+}
+
 async function loadCatalog(): Promise<Catalog> {
   const { readFile } = await import("node:fs/promises");
   return JSON.parse(await readFile(catalogPath, "utf8")) as Catalog;
@@ -550,13 +623,21 @@ client.once(Events.ClientReady, async (readyClient) => {
 
   for (const guild of readyClient.guilds.cache.values()) {
     const commands = await readyClient.application.commands.fetch({ guildId: guild.id });
-    const existing = commands.find((command) => command.name === "review");
-    const commandData = {
+    const existingReview = commands.find((command) => command.name === "review");
+    const reviewCommand = {
       name: "review",
       description: "Open an invoice for review or continuation",
     };
-    if (existing) await existing.edit(commandData);
-    else await readyClient.application.commands.create(commandData, guild.id);
+    if (existingReview) await existingReview.edit(reviewCommand);
+    else await readyClient.application.commands.create(reviewCommand, guild.id);
+
+    const existingSale = commands.find((command) => command.name === "sale");
+    const saleCommand = {
+      name: "sale",
+      description: "Find an inventory card and start a sale",
+    };
+    if (existingSale) await existingSale.edit(saleCommand);
+    else await readyClient.application.commands.create(saleCommand, guild.id);
   }
 });
 
@@ -782,6 +863,95 @@ client.on(Events.MessageCreate, async (message: Message) => {
 });
 
 client.on(Events.InteractionCreate, async (interaction) => {
+  if (interaction.isChatInputCommand() && interaction.commandName === "sale") {
+    if (!workbookPath) {
+      await interaction.reply({ content: "Sales search is not configured because INVENTORY_WORKBOOK_PATH is missing.", flags: MessageFlags.Ephemeral });
+      return;
+    }
+
+    await interaction.showModal(buildSaleSearchModal());
+    return;
+  }
+
+  if (interaction.isModalSubmit() && interaction.customId === "sale:search") {
+    if (!workbookPath) {
+      await interaction.reply({ content: "Sales search is not configured because INVENTORY_WORKBOOK_PATH is missing.", flags: MessageFlags.Ephemeral });
+      return;
+    }
+
+    const query = interaction.fields.getTextInputValue("sale-search").trim();
+    try {
+      const parsed = readV2InventoryWorkbook(workbookPath);
+      const { available, row } = buildSaleInventoryMenu(parsed.rows, query);
+
+      if (available.length === 0) {
+        await interaction.reply({
+          content: query
+            ? `No available inventory records matched **${query}**. Search by card name, set, card number, rarity, condition, variant, or Inventory ID.`
+            : "There is no available inventory to sell.",
+          flags: MessageFlags.Ephemeral,
+        });
+        return;
+      }
+
+      await interaction.reply({
+        content: [
+          query ? `Search results for **${query}**:` : "Available inventory:",
+          available.length === 25 ? "Showing the first 25 matches." : `Found **${available.length}** matching record(s).`,
+          "Select the exact inventory record below to continue the sale.",
+        ].join("\n"),
+        components: [row],
+        flags: MessageFlags.Ephemeral,
+      });
+    } catch (error) {
+      console.error("Failed to search inventory for sale:", error);
+      await interaction.reply({ content: "I couldn't read the Inventory sheet right now. Check the bot logs.", flags: MessageFlags.Ephemeral });
+    }
+    return;
+  }
+
+  if (interaction.isStringSelectMenu() && interaction.customId === "sale:inventory-select") {
+    const inventoryId = interaction.values[0];
+
+    if (!workbookPath) {
+      await interaction.update({ content: "Sales search is not configured because INVENTORY_WORKBOOK_PATH is missing.", components: [] });
+      return;
+    }
+
+    try {
+      const parsed = readV2InventoryWorkbook(workbookPath);
+      const selected = parsed.rows.find((row) => row.inventoryId === inventoryId && row.remainingQty > 0);
+
+      if (!selected) {
+        await interaction.update({ content: "That inventory record is no longer available for sale. Search again with **/sale**.", components: [] });
+        return;
+      }
+
+      const details = [
+        "**Selected Inventory**",
+        "",
+        `**${selected.cardName} — ${selected.cardNumber}**`,
+        `${selected.setSeries} • ${selected.rarity || "Rarity not set"} • ${selected.variantPrinting || "Normal"}`,
+        `${selected.condition} • ${selected.language}`,
+        "",
+        `Inventory ID: **${selected.inventoryId}**`,
+        `Available: **${selected.remainingQty}**`,
+        `Unit Cost: **₱${selected.unitCost.toFixed(2)}**`,
+        "",
+        "The sale-entry dialogue will use this inventory record. Quantity and sell price will be entered next.",
+      ].join("\n");
+
+      await interaction.update({
+        content: details,
+        components: [],
+      });
+    } catch (error) {
+      console.error("Failed to load selected inventory record:", error);
+      await interaction.update({ content: "I couldn't load that inventory record. Search again with **/sale**.", components: [] });
+    }
+    return;
+  }
+
   if (interaction.isChatInputCommand() && interaction.commandName === "review") {
     const transactions = listPendingTransactions();
     const continuations = listPendingContinuations();
