@@ -104,7 +104,10 @@ function mergeContinuationInvoice(
   };
 }
 
-async function invoicePageFingerprint(invoice: Awaited<ReturnType<typeof extractInvoice>>): Promise<string> {
+async function invoicePageFingerprint(
+  invoice: Awaited<ReturnType<typeof extractInvoice>>,
+  filePath?: string,
+): Promise<string> {
   const normalized = JSON.stringify(invoice.lineItems.map((line) => ({
     productName: line.productName?.trim() ?? null,
     setName: line.setName?.trim() ?? null,
@@ -116,7 +119,9 @@ async function invoicePageFingerprint(invoice: Awaited<ReturnType<typeof extract
     unitPrice: line.unitPrice ?? null,
     totalPrice: line.totalPrice ?? null,
   })));
-  return createHash("sha256").update(normalized).digest("hex");
+  const hash = createHash("sha256").update(normalized);
+  if (filePath) hash.update(await readFile(filePath));
+  return hash.digest("hex");
 }
 
 function formatMoney(amount: number | null, currency: string | null): string {
@@ -527,7 +532,7 @@ client.on(Events.MessageCreate, async (message: Message) => {
 
       const catalog = await loadCatalog();
       const sourceMessageId = `DISCORD-${message.id}-${attachment.id}`;
-      const fingerprint = await invoicePageFingerprint(invoice);
+      const fingerprint = await invoicePageFingerprint(invoice, filePath);
       const existingPage = findTransactionByPageFingerprint(fingerprint);
       if (existingPage) {
         await message.reply(`This invoice page was already processed for **${existingPage.invoice.orderId || existingPage.id.slice(0, 8)}**. No cards were added.`);
@@ -543,7 +548,7 @@ client.on(Events.MessageCreate, async (message: Message) => {
 
       const matchingOrderTransaction = invoice.orderId ? findTransactionByOrderId(invoice.orderId) : undefined;
       if (matchingOrderTransaction) {
-        const fingerprint = await invoicePageFingerprint(invoice);
+        const fingerprint = await invoicePageFingerprint(invoice, filePath);
         const duplicate = matchingOrderTransaction.pages.some((page) => page.fingerprint === fingerprint);
         if (duplicate) {
           await message.reply("This invoice page was already attached to **" + (matchingOrderTransaction.invoice.orderId || matchingOrderTransaction.id.slice(0, 8)) + "**. No cards were added.");
@@ -575,7 +580,7 @@ client.on(Events.MessageCreate, async (message: Message) => {
 
       const continuationCandidates = listPendingTransactions();
       if (!invoiceHasIdentity(invoice) && invoice.lineItems.length > 0 && continuationCandidates.length > 0) {
-        const fingerprint = await invoicePageFingerprint(invoice);
+        const fingerprint = await invoicePageFingerprint(invoice, filePath);
         const duplicateContinuation = listPendingContinuations().some((pending) => pending.fingerprint === fingerprint);
         if (duplicateContinuation) {
           await message.reply("This continuation page is already waiting for invoice selection. No cards were added.");
@@ -615,7 +620,7 @@ client.on(Events.MessageCreate, async (message: Message) => {
           sourceMessageId,
           attachmentName: attachment.name ?? "invoice",
           receivedAt: new Date().toISOString(),
-          fingerprint: await invoicePageFingerprint(invoice),
+          fingerprint: await invoicePageFingerprint(invoice, filePath),
           lineCount: invoice.lineItems.length,
         },
       );
