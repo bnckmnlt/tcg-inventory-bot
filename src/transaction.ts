@@ -132,6 +132,10 @@ export function createPendingTransaction(
     }],
   };
 
+  if (transaction.status === "ACTIVE" && activeTransactionId && activeTransactionId !== transaction.id) {
+    const previousActive = pendingTransactions.get(activeTransactionId);
+    if (previousActive && previousActive.status === "ACTIVE") previousActive.status = "READY";
+  }
   pendingTransactions.set(transaction.id, transaction);
   if (transaction.status === "ACTIVE") activeTransactionId = transaction.id;
   savePendingTransactions();
@@ -228,6 +232,10 @@ export function getActiveTransaction(): PendingTransaction | undefined {
 }
 
 export function setTransactionStatus(transaction: PendingTransaction, status: InvoiceTransactionStatus): void {
+  if (status === "ACTIVE" && activeTransactionId && activeTransactionId !== transaction.id) {
+    const previousActive = pendingTransactions.get(activeTransactionId);
+    if (previousActive && previousActive.status === "ACTIVE") previousActive.status = "READY";
+  }
   transaction.status = status;
   if (status === "ACTIVE") activeTransactionId = transaction.id;
   else if (activeTransactionId === transaction.id) activeTransactionId = undefined;
