@@ -15,6 +15,7 @@ const {
   findTransactionByOrderId,
   findTransactionByPageFingerprint,
   findTransactionsByPageDocumentFingerprint,
+  findPendingTransactionByPageSimilarity,
   getPendingContinuation,
   listPendingTransactions,
   listContinuationTargets,
@@ -310,6 +311,148 @@ test("integrates 16 -> 18 -> 11 -> reupload-16 without attaching a duplicate con
   // The duplicate upload must not mutate the pending invoice into a two-page continuation.
   assert.equal(invoice16.status, "PENDING_REVIEW");
   assert.equal(invoice16.pages.length, 1);
+});
+
+test("detects a pending reupload when OCR loses invoice identity", () => {
+  const pending = createPendingTransaction(
+    { ...transaction().invoice, orderId: "OCR-LOSS-16" },
+    "ocr-loss-16",
+    ["ocr-loss-16.jpg"],
+    sampleCatalog,
+    {
+      rows: [
+        {
+          ingestionKey: "ocr-loss-16:line:1",
+          sourceMessageId: "ocr-loss-16",
+          sourceLine: 1,
+          action: "INSERT",
+          state: "EXACT",
+          input: {
+            inventoryId: "OCR-LOSS-16-001",
+            cardName: "Pikachu",
+            setSeries: "Base Set",
+            cardNumber: "025",
+            condition: "Near Mint",
+            language: "English",
+            variantPrinting: "Normal",
+            remainingQty: 2,
+            qtyPurchased: 2,
+            unitCost: 10,
+            totalCost: 20,
+          },
+          reasons: [],
+        },
+        {
+          ingestionKey: "ocr-loss-16:line:2",
+          sourceMessageId: "ocr-loss-16",
+          sourceLine: 2,
+          action: "INSERT",
+          state: "EXACT",
+          input: {
+            inventoryId: "OCR-LOSS-16-002",
+            cardName: "Charizard",
+            setSeries: "Base Set",
+            cardNumber: "004",
+            condition: "Near Mint",
+            language: "English",
+            variantPrinting: "Normal",
+            remainingQty: 1,
+            qtyPurchased: 1,
+            unitCost: 50,
+            totalCost: 50,
+          },
+          reasons: [],
+        },
+      ],
+      insertable: 2,
+      pendingReview: 0,
+      skipped: 0,
+    },
+    {
+      id: "ocr-loss-16-page-1",
+      sourceMessageId: "ocr-loss-16",
+      attachmentName: "ocr-loss-16.jpg",
+      receivedAt: "2026-10-01T05:00:00.000Z",
+      fingerprint: "ocr-loss-file-original",
+      contentFingerprint: "ocr-loss-content-original",
+      documentFingerprint: "ocr-loss-document-original",
+      lineCount: 2,
+    },
+  );
+  setTransactionStatus(pending, "PENDING_REVIEW");
+
+  // Simulate the same physical invoice being re-extracted with seller/order/date
+  // missing and a different file/document fingerprint. The purchased lines are
+  // unchanged, which is the signal we can safely use before continuation logic.
+  const reuploadPlan = {
+    rows: pending.plan.rows.map((row) => ({
+      ...row,
+      sourceMessageId: "ocr-loss-reupload",
+      input: { ...row.input, cardNumber: "1" },
+    })),
+    insertable: 2,
+    pendingReview: 0,
+    skipped: 0,
+  };
+
+  const match = findPendingTransactionByPageSimilarity(reuploadPlan);
+  assert.equal(match?.id, pending.id);
+  assert.equal(pending.pages.length, 1);
+  assert.equal(pending.status, "PENDING_REVIEW");
+
+  // A continuation containing only one of the two original lines must not be
+  // mistaken for a re-upload of the complete original page.
+  const continuationPlan = {
+    rows: [reuploadPlan.rows[0]],
+    insertable: 1,
+    pendingReview: 0,
+    skipped: 0,
+  };
+  assert.equal(findPendingTransactionByPageSimilarity(continuationPlan), undefined);
+});
+
+test("does not guess when two pending invoices have identical page lines", () => {
+  const first = createPendingTransaction(
+    { ...transaction().invoice, orderId: "AMBIGUOUS-1" },
+    "ambiguous-1",
+    ["ambiguous-1.jpg"],
+    sampleCatalog,
+    { rows: [{
+      ingestionKey: "ambiguous:1",
+      sourceMessageId: "ambiguous-1",
+      sourceLine: 1,
+      action: "INSERT",
+      state: "EXACT",
+      input: {
+        inventoryId: "AMB-001",
+        cardName: "Pikachu",
+        setSeries: "Base Set",
+        cardNumber: "025",
+        condition: "Near Mint",
+        language: "English",
+        variantPrinting: "Normal",
+        remainingQty: 1,
+        qtyPurchased: 1,
+        unitCost: 10,
+        totalCost: 10,
+      },
+      reasons: [],
+    }], insertable: 1, pendingReview: 0, skipped: 0 },
+    { id: "ambiguous-1-page", sourceMessageId: "ambiguous-1", attachmentName: "a.jpg", receivedAt: "2026-10-01T05:01:00.000Z", fingerprint: "amb-1", lineCount: 1 },
+  );
+  setTransactionStatus(first, "PENDING_REVIEW");
+
+  const second = createPendingTransaction(
+    { ...transaction().invoice, orderId: "AMBIGUOUS-2" },
+    "ambiguous-2",
+    ["ambiguous-2.jpg"],
+    sampleCatalog,
+    { rows: first.plan.rows.map((row) => ({ ...row, sourceMessageId: "ambiguous-2", input: { ...row.input, inventoryId: "AMB-002" } })), insertable: 1, pendingReview: 0, skipped: 0 },
+    { id: "ambiguous-2-page", sourceMessageId: "ambiguous-2", attachmentName: "b.jpg", receivedAt: "2026-10-01T05:02:00.000Z", fingerprint: "amb-2", lineCount: 1 },
+  );
+  setTransactionStatus(second, "PENDING_REVIEW");
+
+  assert.equal(findPendingTransactionByPageSimilarity(first.plan), undefined);
 });
 
 test("detects a reuploaded stored page by document fingerprint", () => {

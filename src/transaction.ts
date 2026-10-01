@@ -222,6 +222,72 @@ export function findTransactionsByPageDocumentFingerprint(documentFingerprint: s
   );
 }
 
+function normalizeSimilarityPart(value: string | number | null | undefined): string {
+  return String(value ?? "").trim().toLowerCase();
+}
+
+function invoiceLineSimilarityKey(row: IngestionPlan["rows"][number]): string {
+  const input = row.input;
+  return [
+    normalizeSimilarityPart(input.cardName),
+    normalizeSimilarityPart(input.setSeries),
+    normalizeSimilarityPart(input.condition),
+    normalizeSimilarityPart(input.language),
+    normalizeSimilarityPart(input.variantPrinting),
+    normalizeSimilarityPart(input.qtyPurchased),
+    normalizeSimilarityPart(input.unitCost),
+    normalizeSimilarityPart(input.totalCost),
+  ].join("|");
+}
+
+/**
+ * Finds a unique pending invoice whose existing page has the same extracted
+ * purchase lines as an incoming re-upload. Card number is intentionally not
+ * part of the comparison because OCR can lose or alter it on re-upload.
+ *
+ * This is only used as a duplicate guard before continuation detection. A
+ * match must cover the complete page line-for-line, and ambiguous matches are
+ * rejected rather than guessed so two genuinely identical invoices cannot be
+ * silently merged.
+ */
+export function findPendingTransactionByPageSimilarity(
+  incomingPlan: IngestionPlan,
+): PendingTransaction | undefined {
+  const incomingRows = incomingPlan.rows.filter((row) => row.action !== "SKIP");
+  if (incomingRows.length === 0) return undefined;
+
+  const incomingKeys = incomingRows.map(invoiceLineSimilarityKey);
+  const candidates: PendingTransaction[] = [];
+
+  for (const transaction of listPendingTransactions()) {
+    let offset = 0;
+    for (const page of transaction.pages) {
+      const pageRows = transaction.plan.rows.slice(offset, offset + page.lineCount)
+        .filter((row) => row.action !== "SKIP");
+      offset += page.lineCount;
+
+      if (pageRows.length !== incomingRows.length) continue;
+
+      const remaining = pageRows.map(invoiceLineSimilarityKey);
+      let matched = true;
+      for (const incomingKey of incomingKeys) {
+        const index = remaining.indexOf(incomingKey);
+        if (index < 0) {
+          matched = false;
+          break;
+        }
+        remaining.splice(index, 1);
+      }
+      if (matched) {
+        candidates.push(transaction);
+        break;
+      }
+    }
+  }
+
+  return candidates.length === 1 ? candidates[0] : undefined;
+}
+
 export function createPendingContinuation(continuation: PendingContinuation): void {
   pendingContinuations.set(continuation.id, continuation);
   savePendingTransactions();

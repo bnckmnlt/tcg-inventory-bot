@@ -45,6 +45,7 @@ import {
   findTransactionByOrderId,
   findTransactionByPageFingerprint,
   findTransactionsByPageDocumentFingerprint,
+  findPendingTransactionByPageSimilarity,
   setTransactionStatus,
   type InvoicePage,
 } from "./transaction.js";
@@ -588,6 +589,21 @@ client.on(Events.MessageCreate, async (message: Message) => {
       }
 
       const resolved = await buildPlan(invoice, sourceMessageId, catalog);
+
+      // OCR can lose invoice identity fields on a re-upload. Before treating
+      // such a page as a continuation, compare its complete extracted line
+      // set against each existing page of pending invoices. Only a unique
+      // complete-page match is considered a duplicate; ambiguous matches are
+      // left for explicit continuation selection instead of guessing.
+      const similarPendingTransaction = !invoiceHasIdentity(invoice)
+        ? findPendingTransactionByPageSimilarity(resolved.plan)
+        : undefined;
+      if (similarPendingTransaction) {
+        await message.reply(
+          `This invoice page matches the existing pending invoice **${similarPendingTransaction.invoice.orderId || similarPendingTransaction.id.slice(0, 8)}**. No cards were added. Use **/review** to reopen the existing invoice.`,
+        );
+        continue;
+      }
 
       const matchingOrderTransaction = invoice.orderId ? findTransactionByOrderId(invoice.orderId) : undefined;
       if (matchingOrderTransaction) {
