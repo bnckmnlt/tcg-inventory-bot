@@ -5,6 +5,23 @@ import type { InvoiceData } from "./extract.js";
 import { purchaseIdentityKeys, type IngestionPlan } from "./inventory/ingest.js";
 import type { Catalog } from "./catalog/types.js";
 
+export type InvoiceTransactionStatus =
+  | "ACTIVE"
+  | "PENDING_REVIEW"
+  | "READY"
+  | "STORED"
+  | "REJECTED"
+  | "NEEDS_INVOICE_SELECTION";
+
+export interface InvoicePage {
+  id: string;
+  sourceMessageId: string;
+  attachmentName: string;
+  receivedAt: string;
+  fingerprint: string;
+  lineCount: number;
+}
+
 export interface PendingTransaction {
   id: string;
   invoice: InvoiceData;
@@ -12,9 +29,12 @@ export interface PendingTransaction {
   sourceAttachmentNames: string[];
   catalog: Catalog;
   plan: IngestionPlan;
+  status: InvoiceTransactionStatus;
+  pages: InvoicePage[];
 }
 
 const pendingTransactions = new Map<string, PendingTransaction>();
+let activeTransactionId: string | undefined;
 const pendingTransactionsPath = process.env.INVOICE_TEST_MODE === "true"
   ? path.resolve(".test-runtime/pending-transactions.json")
   : path.resolve("data/pending-transactions.json");
@@ -22,7 +42,10 @@ const pendingTransactionsPath = process.env.INVOICE_TEST_MODE === "true"
 function savePendingTransactions(): void {
   writeFileSync(
     pendingTransactionsPath,
-    JSON.stringify([...pendingTransactions.values()], null, 2) + "\n",
+    JSON.stringify({
+      activeTransactionId,
+      transactions: [...pendingTransactions.values()],
+    }, null, 2) + "\n",
     "utf8",
   );
 }
@@ -32,9 +55,27 @@ function loadPendingTransactions(): void {
   try {
     const raw = readFileSync(pendingTransactionsPath, "utf8").trim();
     if (!raw) return;
-    const transactions = JSON.parse(raw) as PendingTransaction[];
+    const parsed = JSON.parse(raw) as PendingTransaction[] | { activeTransactionId?: string; transactions?: PendingTransaction[] };
+    const transactions = Array.isArray(parsed) ? parsed : (parsed.transactions ?? []);
+    activeTransactionId = Array.isArray(parsed) ? undefined : parsed.activeTransactionId;
     for (const transaction of transactions) {
-      if (transaction?.id) pendingTransactions.set(transaction.id, transaction);
+      if (!transaction?.id) continue;
+      transaction.status ??= transaction.plan.rows.some((row) => row.input.reviewRequired)
+        ? "PENDING_REVIEW"
+        : "READY";
+      transaction.pages ??= [{
+        id: transaction.sourceMessageId,
+        sourceMessageId: transaction.sourceMessageId,
+        attachmentName: transaction.sourceAttachmentNames[0] ?? "invoice",
+        receivedAt: new Date().toISOString(),
+        fingerprint: "",
+        lineCount: transaction.plan.rows.length,
+      }];
+      pendingTransactions.set(transaction.id, transaction);
+    }
+    if (!activeTransactionId) {
+      const active = [...pendingTransactions.values()].find((transaction) => transaction.status === "ACTIVE");
+      activeTransactionId = active?.id;
     }
   } catch (error) {
     console.error("Failed to load pending invoice reviews:", error);
@@ -49,7 +90,9 @@ export function createPendingTransaction(
   sourceAttachmentNames: string[],
   catalog: Catalog,
   plan: IngestionPlan,
+  page?: InvoicePage,
 ): PendingTransaction {
+  const needsReview = plan.rows.some((row) => row.input.reviewRequired);
   const transaction: PendingTransaction = {
     id: randomUUID(),
     invoice,
@@ -57,9 +100,19 @@ export function createPendingTransaction(
     sourceAttachmentNames,
     catalog,
     plan,
+    status: needsReview ? "PENDING_REVIEW" : "ACTIVE",
+    pages: [page ?? {
+      id: sourceMessageId,
+      sourceMessageId,
+      attachmentName: sourceAttachmentNames[0] ?? "invoice",
+      receivedAt: new Date().toISOString(),
+      fingerprint: "",
+      lineCount: plan.rows.length,
+    }],
   };
 
   pendingTransactions.set(transaction.id, transaction);
+  if (transaction.status === "ACTIVE") activeTransactionId = transaction.id;
   savePendingTransactions();
   return transaction;
 }
@@ -114,7 +167,42 @@ export function getPendingTransactionByPurchaseIdentity(
 }
 
 export function listPendingTransactions(): PendingTransaction[] {
-  return [...pendingTransactions.values()];
+  return [...pendingTransactions.values()].filter((transaction) => transaction.status !== "STORED" && transaction.status !== "REJECTED");
+}
+
+export function getActiveTransaction(): PendingTransaction | undefined {
+  const transaction = activeTransactionId ? pendingTransactions.get(activeTransactionId) : undefined;
+  return transaction && transaction.status === "ACTIVE" ? transaction : undefined;
+}
+
+export function setTransactionStatus(transaction: PendingTransaction, status: InvoiceTransactionStatus): void {
+  transaction.status = status;
+  if (status === "ACTIVE") activeTransactionId = transaction.id;
+  else if (activeTransactionId === transaction.id) activeTransactionId = undefined;
+  savePendingTransactions();
+}
+
+export function appendInvoicePage(
+  transaction: PendingTransaction,
+  page: InvoicePage,
+  plan: IngestionPlan,
+  invoice: InvoiceData,
+): PendingTransaction {
+  if (transaction.pages.some((existing) => existing.fingerprint && existing.fingerprint === page.fingerprint)) {
+    throw new Error("DUPLICATE_INVOICE_PAGE");
+  }
+
+  transaction.invoice = invoice;
+  transaction.plan.rows.push(...plan.rows);
+  transaction.plan.insertable += plan.insertable;
+  transaction.plan.pendingReview += plan.pendingReview;
+  transaction.plan.skipped += plan.skipped;
+  transaction.sourceAttachmentNames.push(page.attachmentName);
+  transaction.pages.push(page);
+  transaction.status = transaction.plan.rows.some((row) => row.input.reviewRequired) ? "PENDING_REVIEW" : "ACTIVE";
+  activeTransactionId = transaction.status === "ACTIVE" ? transaction.id : undefined;
+  savePendingTransactions();
+  return transaction;
 }
 
 export function removePendingTransaction(id: string): void {

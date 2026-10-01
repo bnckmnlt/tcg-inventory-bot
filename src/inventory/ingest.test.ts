@@ -243,6 +243,28 @@ test("records Dunsparce as a purchase even when catalog identity is unresolved",
   assert.equal(plan.rows[0].input.skuId, undefined);
 });
 
+test("offsets source lines for continuation pages", () => {
+  const plan = planInvoiceIngestion(sampleCatalog, invoice([{
+    productName: "Pikachu",
+    setName: "Base Set",
+    cardNumber: "025",
+    condition: "Near Mint",
+    rarity: "Common",
+    language: "English",
+    variant: "Normal",
+    quantity: 1,
+    unitPrice: 1,
+    totalPrice: 1,
+  }]), "PAGE-2", new Set(), {
+    allowMissingCardNumber: true,
+    sourceLineOffset: 25,
+  });
+
+  assert.equal(plan.rows[0].sourceLine, 26);
+  assert.equal(plan.rows[0].input.sourceLine, 26);
+  assert.equal(plan.rows[0].ingestionKey, "PAGE-2:line:26");
+});
+
 test("skips an already-recorded invoice line by order and source line", () => {
   const existing = new Set(["order:test-001:line:1"]);
   const plan = planInvoiceIngestion(sampleCatalog, invoice([

@@ -149,12 +149,12 @@ export function planInvoiceIngestion(
   invoice: InvoiceData,
   sourceMessageId: string,
   existingInventoryIds = new Set<string>(),
-  options: { allowMissingCardNumber?: boolean } = {},
+  options: { allowMissingCardNumber?: boolean; sourceLineOffset?: number } = {},
 ): IngestionPlan {
   const rows: IngestionPlanRow[] = [];
 
   invoice.lineItems.forEach((line, index) => {
-    const sourceLine = index + 1;
+    const sourceLine = (options.sourceLineOffset ?? 0) + index + 1;
     const ingestionKey = `${sourceMessageId}:line:${sourceLine}`;
     const inventoryId = `IMG-${sourceMessageId}-${String(sourceLine).padStart(3, "0")}`;
     const review = reviewMetadataForLine(invoice, sourceLine);
