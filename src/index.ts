@@ -46,6 +46,7 @@ import {
   findTransactionByPageFingerprint,
   findTransactionsByPageDocumentFingerprint,
   findPendingTransactionsByPageFilename,
+  findTransactionByPageSimilarity,
   findPendingTransactionByPageSimilarity,
   setTransactionStatus,
   type InvoicePage,
@@ -266,7 +267,10 @@ function buildReviewEmbeds(
       ].join("\n");
 
       cardEmbed.addFields({
-        name: truncateDiscord(`${index}. ${row.input.cardName || "Unknown card"} — ${row.action}`, 256),
+        name: truncateDiscord(
+          `${index}. ${row.input.cardName || "Unknown card"} — ${row.input.cardNumber || "Card No. unknown"} — ${row.input.variantPrinting || "Variant unknown"} — ${row.action}`,
+          256,
+        ),
         value: truncateDiscord(
           `${details}${row.input.reviewNotes?.length ? `\nNotes: ${row.input.reviewNotes.join(" ").slice(0, 500)}` : ""}\n\nReason: ${row.reasons.join(" ").slice(0, 700)}`,
           1024,
@@ -631,6 +635,17 @@ client.on(Events.MessageCreate, async (message: Message) => {
       if (similarPendingTransaction) {
         await message.reply(
           `This invoice page matches the existing pending invoice **${similarPendingTransaction.invoice.orderId || similarPendingTransaction.id.slice(0, 8)}**. No cards were added. Use **/review** to reopen the existing invoice.`,
+        );
+        continue;
+      }
+
+      // Before treating a matching order ID as a continuation, make sure the
+      // incoming page is not a re-upload of an existing page. This also covers
+      // stored invoices where file/document fingerprints may differ between scans.
+      const similarProcessedTransaction = findTransactionByPageSimilarity(resolved.plan);
+      if (similarProcessedTransaction) {
+        await message.reply(
+          `This invoice page matches an already processed page for **${similarProcessedTransaction.invoice.orderId || similarProcessedTransaction.id.slice(0, 8)}**. No cards were added.`,
         );
         continue;
       }
@@ -1053,9 +1068,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
     await interaction.deferUpdate();
 
     try {
-      // Create a recoverable local snapshot before any production persistence.
-      // Test mode intentionally skips backups because its workbook is disposable.
-      if (!invoiceTestMode) {
+      // Production workbook backups are currently opt-in. Set
+      // INVENTORY_BACKUP_ON_WRITE=true to enable them again.
+      if (!invoiceTestMode && process.env.INVENTORY_BACKUP_ON_WRITE === "true") {
         await createInventoryBackup({
           workbookPath,
           inventoryPath,

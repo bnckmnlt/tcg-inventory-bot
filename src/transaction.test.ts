@@ -16,6 +16,7 @@ const {
   findTransactionByPageFingerprint,
   findTransactionsByPageDocumentFingerprint,
   findPendingTransactionsByPageFilename,
+  findTransactionByPageSimilarity,
   findPendingTransactionByPageSimilarity,
   getPendingContinuation,
   listPendingTransactions,
@@ -312,6 +313,70 @@ test("integrates 16 -> 18 -> 11 -> reupload-16 without attaching a duplicate con
   // The duplicate upload must not mutate the pending invoice into a two-page continuation.
   assert.equal(invoice16.status, "PENDING_REVIEW");
   assert.equal(invoice16.pages.length, 1);
+});
+
+test("detects a stored invoice page reupload before continuation matching", () => {
+  const pageRows = (prefix: string, count: number) => Array.from({ length: count }, (_, index) => ({
+    ingestionKey: `${prefix}:line:${index + 1}`,
+    sourceMessageId: prefix,
+    sourceLine: index + 1,
+    action: "INSERT" as const,
+    state: "EXACT" as const,
+    reasons: [],
+    input: {
+      inventoryId: `${prefix}-${index + 1}`,
+      cardName: `Card ${prefix} ${index + 1}`,
+      setSeries: "Test Set",
+      cardNumber: String(index + 1),
+      condition: "Near Mint",
+      language: "English",
+      variantPrinting: "Normal",
+      remainingQty: 1,
+      qtyPurchased: 1,
+      unitPrice: 1,
+      totalPrice: 1,
+      reviewRequired: false,
+      reviewFlags: [],
+    },
+  }));
+
+  const firstPageRows = pageRows("stored-page-1", 16);
+  const continuationRows = pageRows("stored-page-2", 7);
+  const stored = createPendingTransaction(
+    { ...transaction().invoice, orderId: "STORED-23" },
+    "stored-23",
+    ["page-1.jpg"],
+    sampleCatalog,
+    { rows: [...firstPageRows], insertable: 16, pendingReview: 0, skipped: 0 },
+    {
+      id: "stored-page-1",
+      sourceMessageId: "stored-23",
+      attachmentName: "page-1.jpg",
+      receivedAt: "2026-10-01T05:00:00.000Z",
+      fingerprint: "stored-page-1-fingerprint",
+      contentFingerprint: "stored-page-1-content",
+      documentFingerprint: "stored-23-document",
+      lineCount: 16,
+    },
+  );
+  appendInvoicePage(stored, {
+    id: "stored-page-2",
+    sourceMessageId: "stored-page-2",
+    attachmentName: "page-2.jpg",
+    receivedAt: "2026-10-01T05:01:00.000Z",
+    fingerprint: "stored-page-2-fingerprint",
+    contentFingerprint: "stored-page-2-content",
+    documentFingerprint: "stored-23-document",
+    lineCount: 7,
+  }, { rows: continuationRows, insertable: 7, pendingReview: 0, skipped: 0 }, stored.invoice);
+  setTransactionStatus(stored, "STORED");
+
+  const reuploadedPlan = { rows: firstPageRows.map((row) => ({ ...row, ingestionKey: `${row.ingestionKey}-reupload` })), insertable: 16, pendingReview: 0, skipped: 0 };
+  const match = findTransactionByPageSimilarity(reuploadedPlan);
+
+  assert.equal(match?.id, stored.id);
+  assert.equal(match?.status, "STORED");
+  assert.equal(match?.pages.length, 2);
 });
 
 test("detects a pending reupload when OCR loses invoice identity", () => {

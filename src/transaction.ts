@@ -281,7 +281,7 @@ function invoiceLineSimilarityKey(row: IngestionPlan["rows"][number]): string {
  * rejected rather than guessed so two genuinely identical invoices cannot be
  * silently merged.
  */
-export function findPendingTransactionByPageSimilarity(
+export function findTransactionByPageSimilarity(
   incomingPlan: IngestionPlan,
 ): PendingTransaction | undefined {
   const incomingRows = incomingPlan.rows.filter((row) => row.action !== "SKIP");
@@ -290,7 +290,7 @@ export function findPendingTransactionByPageSimilarity(
   const incomingKeys = incomingRows.map(invoiceLineSimilarityKey);
   const candidates: PendingTransaction[] = [];
 
-  for (const transaction of listPendingTransactions()) {
+  for (const transaction of [...pendingTransactions.values()].filter((item) => item.status !== "REJECTED")) {
     let offset = 0;
     for (const page of transaction.pages) {
       const pageRows = transaction.plan.rows.slice(offset, offset + page.lineCount)
@@ -317,6 +317,31 @@ export function findPendingTransactionByPageSimilarity(
   }
 
   return candidates.length === 1 ? candidates[0] : undefined;
+}
+
+export function findPendingTransactionByPageSimilarity(
+  incomingPlan: IngestionPlan,
+): PendingTransaction | undefined {
+  const candidates = [...pendingTransactions.values()].filter((transaction) => transaction.status !== "STORED" && transaction.status !== "REJECTED");
+  const incomingRows = incomingPlan.rows.filter((row) => row.action !== "SKIP");
+  if (incomingRows.length === 0) return undefined;
+
+  const incomingKeys = incomingRows.map(invoiceLineSimilarityKey);
+  const matches: PendingTransaction[] = [];
+  for (const transaction of candidates) {
+    let offset = 0;
+    for (const page of transaction.pages) {
+      const pageRows = transaction.plan.rows.slice(offset, offset + page.lineCount).filter((row) => row.action !== "SKIP");
+      offset += page.lineCount;
+      if (pageRows.length !== incomingRows.length) continue;
+      const remaining = pageRows.map(invoiceLineSimilarityKey);
+      if (incomingKeys.every((key) => { const index = remaining.indexOf(key); if (index < 0) return false; remaining.splice(index, 1); return true; })) {
+        matches.push(transaction);
+        break;
+      }
+    }
+  }
+  return matches.length === 1 ? matches[0] : undefined;
 }
 
 export function createPendingContinuation(continuation: PendingContinuation): void {

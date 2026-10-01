@@ -272,26 +272,41 @@ export function persistInvoicePlanToWorkbookSafely(
 ): WorkbookPersistenceResult {
   if (!existsSync(workbookPath)) throw new Error(`Workbook not found: ${workbookPath}`);
 
-  const rows = invoicePlanToWorkbookRows(plan, invoice, options);
-  if (rows.length === 0) {
-    return { outputPath: workbookPath, inserted: 0, skipped: plan.skipped, pendingReview: plan.pendingReview, insertedInventoryIds: [] };
-  }
-
   const source = readV2InventoryWorkbook(workbookPath);
   if (source.issues.length > 0) {
     throw new Error(`Source workbook has parser issues; refusing to write: ${source.issues.map((issue) => issue.message).join(" | ")}`);
   }
 
-  const expectedPurchased = source.rows.reduce((sum, row) => sum + row.qtyPurchased, 0) + rows.reduce((sum, row) => sum + (row.qtyPurchased ?? 0), 0);
-  const expectedRemaining = source.rows.reduce((sum, row) => sum + row.remainingQty, 0) + rows.reduce((sum, row) => sum + row.remainingQty, 0);
   const existingIds = new Set(source.rows.map((row) => row.inventoryId));
-  for (const row of rows) {
-    if (existingIds.has(row.inventoryId)) throw new Error(`Inventory ID already exists in workbook: ${row.inventoryId}`);
+  const newRows = invoicePlanToWorkbookRows(plan, invoice, options).filter((row) => !existingIds.has(row.inventoryId));
+  const alreadyPersistedCount = plan.insertable - newRows.length;
+  const persistencePlan: IngestionPlan = {
+    ...plan,
+    rows: plan.rows.map((planned) =>
+      planned.action === "INSERT" && planned.inventoryId && existingIds.has(planned.inventoryId)
+        ? { ...planned, action: "SKIP", reasons: [...planned.reasons, "This inventory row is already present in the workbook; safe retry is a no-op."] }
+        : planned,
+    ),
+    insertable: newRows.length,
+    skipped: plan.skipped + alreadyPersistedCount,
+  };
+
+  if (newRows.length === 0) {
+    return {
+      outputPath: workbookPath,
+      inserted: 0,
+      skipped: persistencePlan.skipped,
+      pendingReview: persistencePlan.pendingReview,
+      insertedInventoryIds: [],
+    };
   }
+
+  const expectedPurchased = source.rows.reduce((sum, row) => sum + row.qtyPurchased, 0) + newRows.reduce((sum, row) => sum + (row.qtyPurchased ?? 0), 0);
+  const expectedRemaining = source.rows.reduce((sum, row) => sum + row.remainingQty, 0) + newRows.reduce((sum, row) => sum + row.remainingQty, 0);
 
   const tempPath = `${workbookPath}.tmp-${process.pid}-${Date.now()}`;
   try {
-    createSafeWorkbookOutput(workbookPath, tempPath, plan, invoice, options);
+    createSafeWorkbookOutput(workbookPath, tempPath, persistencePlan, invoice, options);
     const candidate = readV2InventoryWorkbook(tempPath);
     if (candidate.issues.length > 0) {
       throw new Error(`Generated workbook failed parser validation: ${candidate.issues.map((issue) => issue.message).join(" | ")}`);
@@ -300,23 +315,23 @@ export function persistInvoicePlanToWorkbookSafely(
     const purchased = candidate.rows.reduce((sum, row) => sum + row.qtyPurchased, 0);
     const remaining = candidate.rows.reduce((sum, row) => sum + row.remainingQty, 0);
     const candidateIds = new Set(candidate.rows.map((row) => row.inventoryId));
-    if (candidate.rows.length !== source.rows.length + rows.length) {
-      throw new Error(`Workbook row-count regression: expected ${source.rows.length + rows.length}, got ${candidate.rows.length}.`);
+    if (candidate.rows.length !== source.rows.length + newRows.length) {
+      throw new Error("Workbook row-count regression: expected " + (source.rows.length + newRows.length) + ", got " + candidate.rows.length + ".");
     }
     if (purchased !== expectedPurchased || remaining !== expectedRemaining) {
       throw new Error(`Workbook quantity regression: expected purchased/remaining ${expectedPurchased}/${expectedRemaining}, got ${purchased}/${remaining}.`);
     }
-    for (const row of rows) {
+    for (const row of newRows) {
       if (!candidateIds.has(row.inventoryId)) throw new Error(`Inserted inventory ID is missing from candidate workbook: ${row.inventoryId}`);
     }
 
     renameSync(tempPath, workbookPath);
     return {
       outputPath: workbookPath,
-      inserted: rows.length,
-      skipped: plan.skipped,
-      pendingReview: plan.pendingReview,
-      insertedInventoryIds: rows.map((row) => row.inventoryId),
+      inserted: newRows.length,
+      skipped: persistencePlan.skipped,
+      pendingReview: persistencePlan.pendingReview,
+      insertedInventoryIds: newRows.map((row) => row.inventoryId),
     };
   } finally {
     if (existsSync(tempPath)) rmSync(tempPath, { force: true });
