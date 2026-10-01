@@ -222,12 +222,41 @@ export function findTransactionsByPageDocumentFingerprint(documentFingerprint: s
   );
 }
 
+function normalizeAttachmentName(value: string): string {
+  return value
+    .normalize("NFKC")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, " ");
+}
+
+/**
+ * Finds pending invoices that already contain a page with the same attachment
+ * filename. Filename is a secondary duplicate signal: it is useful when OCR
+ * or file-content fingerprints change, but it is deliberately returned as a
+ * candidate list so callers never guess when multiple invoices share a name.
+ */
+export function findPendingTransactionsByPageFilename(
+  attachmentName: string,
+  lineCount?: number,
+): PendingTransaction[] {
+  const normalized = normalizeAttachmentName(attachmentName);
+  if (!normalized) return [];
+
+  return listPendingTransactions().filter((transaction) =>
+    transaction.pages.some((page) =>
+      normalizeAttachmentName(page.attachmentName) === normalized &&
+      (lineCount === undefined || page.lineCount === lineCount),
+    ),
+  );
+}
+
 function normalizeSimilarityPart(value: string | number | null | undefined): string {
   return String(value ?? "")
     .normalize("NFKC")
     .trim()
     .toLowerCase()
-    .replace(/\\s+/g, " ");
+    .replace(/\s+/g, " ");
 }
 
 function invoiceLineSimilarityKey(row: IngestionPlan["rows"][number]): string {

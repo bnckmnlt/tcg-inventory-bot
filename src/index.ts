@@ -45,6 +45,7 @@ import {
   findTransactionByOrderId,
   findTransactionByPageFingerprint,
   findTransactionsByPageDocumentFingerprint,
+  findPendingTransactionsByPageFilename,
   findPendingTransactionByPageSimilarity,
   setTransactionStatus,
   type InvoicePage,
@@ -589,6 +590,35 @@ client.on(Events.MessageCreate, async (message: Message) => {
       }
 
       const resolved = await buildPlan(invoice, sourceMessageId, catalog);
+
+      // If OCR or file-content fingerprints change, the original attachment
+      // filename can still provide a useful duplicate signal. It is only
+      // authoritative when exactly one pending invoice has that filename;
+      // shared/generic filenames are treated as ambiguous and never guessed.
+      const attachmentName = attachment.name ?? "invoice";
+      const filenameDuplicateCandidates = findPendingTransactionsByPageFilename(
+        attachmentName,
+        invoice.lineItems.length,
+      );
+
+      if (filenameDuplicateCandidates.length === 1) {
+        const filenameDuplicate = filenameDuplicateCandidates[0];
+        await message.reply(
+          "This invoice page matches the existing pending invoice **" +
+          (filenameDuplicate.invoice.orderId || filenameDuplicate.id.slice(0, 8)) +
+          "** by attachment filename. No cards were added. Use **/review** to reopen the existing invoice.",
+        );
+        continue;
+      }
+
+      if (filenameDuplicateCandidates.length > 1) {
+        await message.reply(
+          "This attachment filename matches **" +
+          filenameDuplicateCandidates.length +
+          "** pending invoices, so I won't guess which one it belongs to. Use **/review** to select the correct invoice instead. No cards were added.",
+        );
+        continue;
+      }
 
       // OCR can lose invoice identity fields on a re-upload. Before treating
       // such a page as a continuation, compare its complete extracted line

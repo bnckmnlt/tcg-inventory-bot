@@ -15,6 +15,7 @@ const {
   findTransactionByOrderId,
   findTransactionByPageFingerprint,
   findTransactionsByPageDocumentFingerprint,
+  findPendingTransactionsByPageFilename,
   findPendingTransactionByPageSimilarity,
   getPendingContinuation,
   listPendingTransactions,
@@ -459,6 +460,102 @@ test("does not guess when two pending invoices have identical page lines", () =>
   setTransactionStatus(second, "PENDING_REVIEW");
 
   assert.equal(findPendingTransactionByPageSimilarity(first.plan), undefined);
+});
+
+test("uses a unique attachment filename as a secondary pending duplicate signal", () => {
+  const pending = createPendingTransaction(
+    { ...transaction().invoice, orderId: "FILENAME-DUPLICATE-001" },
+    "filename-duplicate-source",
+    ["TCGPlayer Invoice 2026-10-01.jpg"],
+    sampleCatalog,
+    {
+      rows: [{
+        ingestionKey: "filename-duplicate:1",
+        sourceMessageId: "filename-duplicate-source",
+        sourceLine: 1,
+        action: "INSERT",
+        state: "EXACT",
+        input: {
+          inventoryId: "FILENAME-DUPLICATE-001",
+          cardName: "Pikachu",
+          setSeries: "Base Set",
+          cardNumber: "025",
+          condition: "Near Mint",
+          language: "English",
+          variantPrinting: "Normal",
+          remainingQty: 1,
+          qtyPurchased: 1,
+        },
+        reasons: [],
+      }],
+      insertable: 1,
+      pendingReview: 0,
+      skipped: 0,
+    },
+    {
+      id: "filename-duplicate-page",
+      sourceMessageId: "filename-duplicate-source",
+      attachmentName: "TCGPlayer Invoice 2026-10-01.jpg",
+      receivedAt: "2026-10-01T06:00:00.000Z",
+      fingerprint: "filename-original-fingerprint",
+      lineCount: 1,
+    },
+  );
+  setTransactionStatus(pending, "PENDING_REVIEW");
+
+  const matches = findPendingTransactionsByPageFilename(
+    "  tcgplayer   invoice 2026-10-01.jpg ",
+    1,
+  );
+  assert.deepEqual(matches.map((item) => item.id), [pending.id]);
+
+  // A filename match with a different extracted line count is not strong
+  // enough to suppress a real continuation.
+  assert.deepEqual(
+    findPendingTransactionsByPageFilename("TCGPlayer Invoice 2026-10-01.jpg", 2),
+    [],
+  );
+});
+
+test("does not guess when a filename is shared by multiple pending invoices", () => {
+  const first = createPendingTransaction(
+    { ...transaction().invoice, orderId: "FILENAME-AMBIGUOUS-1" },
+    "filename-ambiguous-1",
+    ["invoice.jpg"],
+    sampleCatalog,
+    emptyPlan(),
+    {
+      id: "filename-ambiguous-page-1",
+      sourceMessageId: "filename-ambiguous-1",
+      attachmentName: "invoice.jpg",
+      receivedAt: "2026-10-01T06:01:00.000Z",
+      fingerprint: "filename-ambiguous-1",
+      lineCount: 2,
+    },
+  );
+  setTransactionStatus(first, "PENDING_REVIEW");
+
+  const second = createPendingTransaction(
+    { ...transaction().invoice, orderId: "FILENAME-AMBIGUOUS-2" },
+    "filename-ambiguous-2",
+    ["invoice.jpg"],
+    sampleCatalog,
+    emptyPlan(),
+    {
+      id: "filename-ambiguous-page-2",
+      sourceMessageId: "filename-ambiguous-2",
+      attachmentName: "invoice.jpg",
+      receivedAt: "2026-10-01T06:02:00.000Z",
+      fingerprint: "filename-ambiguous-2",
+      lineCount: 2,
+    },
+  );
+  setTransactionStatus(second, "PENDING_REVIEW");
+
+  assert.deepEqual(
+    findPendingTransactionsByPageFilename("invoice.jpg", 2).map((item) => item.id),
+    [first.id, second.id],
+  );
 });
 
 test("detects a reuploaded stored page by document fingerprint", () => {
