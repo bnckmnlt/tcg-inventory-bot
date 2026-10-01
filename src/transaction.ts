@@ -195,6 +195,15 @@ export function listPendingTransactions(): PendingTransaction[] {
   return [...pendingTransactions.values()].filter((transaction) => transaction.status !== "STORED" && transaction.status !== "REJECTED");
 }
 
+export function listContinuationTargets(): PendingTransaction[] {
+  const statusOrder: Record<InvoiceTransactionStatus, number> = {
+    ACTIVE: 0, PENDING_REVIEW: 1, READY: 2, STORED: 3, REJECTED: 4, NEEDS_INVOICE_SELECTION: 5,
+  };
+  return [...pendingTransactions.values()]
+    .filter((transaction) => transaction.status !== "REJECTED")
+    .sort((a, b) => statusOrder[a.status] - statusOrder[b.status]);
+}
+
 export function findTransactionByPageFingerprint(fingerprint: string): PendingTransaction | undefined {
   if (!fingerprint) return undefined;
   return [...pendingTransactions.values()].find((transaction) =>
@@ -223,7 +232,7 @@ export function removePendingContinuation(id: string): void {
 export function findTransactionByOrderId(orderId: string): PendingTransaction | undefined {
   const normalized = orderId.trim().toLowerCase();
   if (!normalized) return undefined;
-  return listPendingTransactions().find((transaction) => transaction.invoice.orderId?.trim().toLowerCase() === normalized);
+  return listContinuationTargets().find((transaction) => transaction.invoice.orderId?.trim().toLowerCase() === normalized);
 }
 
 export function getActiveTransaction(): PendingTransaction | undefined {
@@ -259,7 +268,10 @@ export function appendInvoicePage(
   transaction.plan.skipped += plan.skipped;
   transaction.sourceAttachmentNames.push(page.attachmentName);
   transaction.pages.push(page);
-  transaction.status = transaction.plan.rows.some((row) => row.input.reviewRequired) ? "PENDING_REVIEW" : "ACTIVE";
+  const hasReviewIssues = transaction.plan.rows.some((row) => row.input.reviewRequired);
+  const wasStored = transaction.status === "STORED";
+  const wasPendingReview = transaction.status === "PENDING_REVIEW";
+  transaction.status = hasReviewIssues || wasStored || wasPendingReview ? "PENDING_REVIEW" : "ACTIVE";
   activeTransactionId = transaction.status === "ACTIVE" ? transaction.id : undefined;
   savePendingTransactions();
   return transaction;

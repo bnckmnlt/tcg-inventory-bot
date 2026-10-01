@@ -12,9 +12,11 @@ const {
   appendInvoicePage,
   createPendingContinuation,
   createPendingTransaction,
+  findTransactionByOrderId,
   findTransactionByPageFingerprint,
   getPendingContinuation,
   listPendingTransactions,
+  listContinuationTargets,
   removePendingContinuation,
   setTransactionStatus,
 } = await import("./transaction.js");
@@ -219,6 +221,75 @@ test("runs the full invoice continuation lifecycle without creating a second tra
     fingerprint: "e2e-fingerprint-2",
     lineCount: 1,
   }, continuationPlan, invoice), /DUPLICATE_INVOICE_PAGE/);
+});
+
+test("allows a stored invoice to be reopened by a continuation", () => {
+  const stored = createPendingTransaction(
+    { ...transaction().invoice, orderId: "STORED-CONTINUATION-TARGET" },
+    "stored-page-1",
+    ["stored-page-1.jpg"],
+    sampleCatalog,
+    emptyPlan(),
+  );
+  setTransactionStatus(stored, "STORED");
+
+  assert.equal(listPendingTransactions().some((item) => item.id === stored.id), false);
+  assert.equal(listContinuationTargets().some((item) => item.id === stored.id), true);
+
+  appendInvoicePage(stored, {
+    id: "stored-page-2",
+    sourceMessageId: "stored-page-2",
+    attachmentName: "stored-page-2.jpg",
+    receivedAt: "2026-10-01T02:00:00.000Z",
+    fingerprint: "stored-continuation-fingerprint",
+    lineCount: 1,
+  }, {
+    rows: [{
+      ingestionKey: "stored-page-2:line:1",
+      sourceMessageId: "stored-page-2",
+      sourceLine: 1,
+      action: "INSERT" as const,
+      state: "EXACT" as const,
+      input: {
+        inventoryId: "IMG-stored-page-2-001",
+        cardName: "Eevee",
+        setSeries: "Base Set",
+        cardNumber: "133",
+        condition: "Near Mint",
+        language: "English",
+        variantPrinting: "Normal",
+        remainingQty: 1,
+        qtyPurchased: 1,
+      },
+      reasons: [],
+    }],
+    insertable: 1,
+    pendingReview: 0,
+    skipped: 0,
+  }, stored.invoice);
+
+  assert.equal(stored.status, "PENDING_REVIEW");
+  assert.equal(stored.pages.length, 2);
+  assert.equal(listPendingTransactions().some((item) => item.id === stored.id), true);
+  assert.equal(findTransactionByOrderId("STORED-CONTINUATION-TARGET")?.id, stored.id);
+});
+
+test("keeps an unidentified continuation held without creating an invoice", () => {
+  const continuation = {
+    id: "unassigned-continuation-1",
+    sourceMessageId: "unassigned-page-1",
+    attachmentName: "unassigned-page-1.jpg",
+    receivedAt: "2026-10-01T03:00:00.000Z",
+    fingerprint: "unassigned-fingerprint",
+    invoice: { ...transaction().invoice, orderId: null, seller: null, purchaseDate: null, lineItems: [] },
+    catalog: sampleCatalog,
+    plan: emptyPlan(),
+  };
+
+  createPendingContinuation(continuation);
+  assert.equal(getPendingContinuation(continuation.id)?.id, continuation.id);
+  assert.equal(listPendingTransactions().some((item) => item.sourceMessageId === continuation.sourceMessageId), false);
+  removePendingContinuation(continuation.id);
 });
 
 test("keeps only one invoice ACTIVE when a second invoice is started", () => {

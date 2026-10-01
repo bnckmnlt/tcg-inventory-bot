@@ -35,6 +35,7 @@ import {
   getPendingTransactionBySourceMessageId,
   getPendingTransactionByPurchaseIdentity,
   listPendingTransactions,
+  listContinuationTargets,
   savePendingTransaction,
   createPendingContinuation,
   getPendingContinuation,
@@ -310,9 +311,7 @@ function buildPendingReviewMenu() {
 }
 
 function buildContinuationMenu(continuationId: string) {
-  const transactions = listPendingTransactions()
-    .filter((transaction) => transaction.status !== "STORED" && transaction.status !== "REJECTED")
-    .slice(0, 25);
+  const transactions = listContinuationTargets().slice(0, 25);
   const menu = new StringSelectMenuBuilder()
     .setCustomId(`invoice:continuation-select:${continuationId}`)
     .setPlaceholder("Select the invoice this page belongs to");
@@ -578,8 +577,8 @@ client.on(Events.MessageCreate, async (message: Message) => {
         continue;
       }
 
-      const continuationCandidates = listPendingTransactions();
-      if (!invoiceHasIdentity(invoice) && invoice.lineItems.length > 0 && continuationCandidates.length > 0) {
+      const continuationCandidates = listContinuationTargets();
+      if (!invoiceHasIdentity(invoice) && invoice.lineItems.length > 0) {
         const fingerprint = await invoicePageFingerprint(invoice, filePath);
         const duplicateContinuation = listPendingContinuations().some((pending) => pending.fingerprint === fingerprint);
         if (duplicateContinuation) {
@@ -599,12 +598,18 @@ client.on(Events.MessageCreate, async (message: Message) => {
         });
 
         await message.reply({
-          content: [
-            "📄 **Continuation page detected**",
-            "No invoice identity was found on this page. It contains **" + invoice.lineItems.length + "** card line(s).",
-            "Select the invoice this page belongs to below. The page will not be added until you select one.",
-          ].join("\n"),
-          components: [buildContinuationMenu(sourceMessageId)],
+          content: continuationCandidates.length > 0
+            ? [
+                "📄 **Continuation page detected**",
+                "No invoice identity was found on this page. It contains **" + invoice.lineItems.length + "** card line(s).",
+                "Select the invoice this page belongs to below. The page will not be added until you select one.",
+              ].join("\n")
+            : [
+                "📄 **Unassigned continuation page held**",
+                "No invoice identity was found and there are currently no invoices available to attach it to.",
+                "No cards were added. Use **/review** after the parent invoice has been uploaded so you can attach this page.",
+              ].join("\n"),
+          components: continuationCandidates.length > 0 ? [buildContinuationMenu(sourceMessageId)] : [],
         });
         continue;
       }
@@ -649,17 +654,39 @@ client.on(Events.MessageCreate, async (message: Message) => {
 client.on(Events.InteractionCreate, async (interaction) => {
   if (interaction.isChatInputCommand() && interaction.commandName === "review") {
     const transactions = listPendingTransactions();
-    if (transactions.length === 0) {
-      await interaction.reply({ content: "There are no pending invoice reviews.", flags: MessageFlags.Ephemeral });
+    const continuations = listPendingContinuations();
+    if (transactions.length === 0 && continuations.length === 0) {
+      await interaction.reply({ content: "There are no pending invoice reviews or unassigned continuation pages.", flags: MessageFlags.Ephemeral });
       return;
     }
 
     const shown = transactions.slice(0, 25);
+    const components: ActionRowBuilder<StringSelectMenuBuilder>[] = [];
+    const notices: string[] = [];
+    if (shown.length > 0) {
+      components.push(buildPendingReviewMenu());
+      notices.push(
+        shown.length < transactions.length
+          ? "Select an invoice below. Showing the first " + shown.length + " of " + transactions.length + "."
+          : "Select an invoice below.",
+      );
+    }
+    if (continuations.length > 0 && listContinuationTargets().length > 0) {
+      for (const continuation of continuations.slice(0, 4)) {
+        components.push(buildContinuationMenu(continuation.id));
+      }
+      notices.push(
+        continuations.length === 1
+          ? "You also have **1 unassigned continuation page** waiting for invoice selection."
+          : continuations.length > 4
+            ? "You also have **" + continuations.length + " unassigned continuation pages**. Showing selectors for the first 4; attach those before reopening /review for the rest."
+            : "You also have **" + continuations.length + " unassigned continuation pages** waiting for invoice selection.",
+      );
+    }
+
     await interaction.reply({
-      content: shown.length < transactions.length
-        ? "Select an invoice below. Showing the first " + shown.length + " of " + transactions.length + "."
-        : "Select an invoice below.",
-      components: [buildPendingReviewMenu()],
+      content: notices.join("\n"),
+      components,
       flags: MessageFlags.Ephemeral,
     });
     return;
