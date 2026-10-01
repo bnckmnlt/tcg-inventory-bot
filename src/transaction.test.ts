@@ -54,6 +54,7 @@ function transaction(): PendingTransaction {
       attachmentName: "page-1.jpg",
       receivedAt: "2026-10-01T00:00:00.000Z",
       fingerprint: "fingerprint-1",
+      contentFingerprint: "content-fingerprint-1",
       lineCount: 0,
     }],
   };
@@ -91,7 +92,8 @@ test("attaches a continuation page and updates invoice state", () => {
     sourceMessageId: "page-2",
     attachmentName: "page-2.jpg",
     receivedAt: "2026-10-01T00:01:00.000Z",
-    fingerprint: "fingerprint-2",
+    fingerprint: "different-file-fingerprint",
+    contentFingerprint: "content-fingerprint-2",
     lineCount: 1,
   }, plan, target.invoice);
 
@@ -108,7 +110,8 @@ test("rejects a continuation page whose fingerprint is already attached", () => 
     sourceMessageId: "page-duplicate",
     attachmentName: "duplicate.jpg",
     receivedAt: "2026-10-01T00:02:00.000Z",
-    fingerprint: "fingerprint-1",
+    fingerprint: "different-file-fingerprint",
+    contentFingerprint: "content-fingerprint-1",
     lineCount: 0,
   }, emptyPlan(), target.invoice), /DUPLICATE_INVOICE_PAGE/);
 });

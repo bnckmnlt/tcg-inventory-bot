@@ -19,6 +19,7 @@ export interface InvoicePage {
   attachmentName: string;
   receivedAt: string;
   fingerprint: string;
+  contentFingerprint?: string;
   lineCount: number;
 }
 
@@ -28,6 +29,7 @@ export interface PendingContinuation {
   attachmentName: string;
   receivedAt: string;
   fingerprint: string;
+  contentFingerprint?: string;
   invoice: InvoiceData;
   catalog: Catalog;
   plan: IngestionPlan;
@@ -257,7 +259,10 @@ export function appendInvoicePage(
   plan: IngestionPlan,
   invoice: InvoiceData,
 ): PendingTransaction {
-  if (transaction.pages.some((existing) => existing.fingerprint && existing.fingerprint === page.fingerprint)) {
+  if (transaction.pages.some((existing) =>
+    (existing.fingerprint && existing.fingerprint === page.fingerprint) ||
+    (existing.contentFingerprint && page.contentFingerprint && existing.contentFingerprint === page.contentFingerprint)
+  )) {
     throw new Error("DUPLICATE_INVOICE_PAGE");
   }
 

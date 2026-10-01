@@ -105,10 +105,9 @@ function mergeContinuationInvoice(
   };
 }
 
-async function invoicePageFingerprint(
+function invoicePageContentFingerprint(
   invoice: Awaited<ReturnType<typeof extractInvoice>>,
-  filePath?: string,
-): Promise<string> {
+): string {
   const normalized = JSON.stringify(invoice.lineItems.map((line) => ({
     productName: line.productName?.trim() ?? null,
     setName: line.setName?.trim() ?? null,
@@ -120,7 +119,14 @@ async function invoicePageFingerprint(
     unitPrice: line.unitPrice ?? null,
     totalPrice: line.totalPrice ?? null,
   })));
-  const hash = createHash("sha256").update(normalized);
+  return createHash("sha256").update(normalized).digest("hex");
+}
+
+async function invoicePageFingerprint(
+  invoice: Awaited<ReturnType<typeof extractInvoice>>,
+  filePath?: string,
+): Promise<string> {
+  const hash = createHash("sha256").update(invoicePageContentFingerprint(invoice));
   if (filePath) hash.update(await readFile(filePath));
   return hash.digest("hex");
 }
@@ -532,6 +538,7 @@ client.on(Events.MessageCreate, async (message: Message) => {
       const catalog = await loadCatalog();
       const sourceMessageId = `DISCORD-${message.id}-${attachment.id}`;
       const fingerprint = await invoicePageFingerprint(invoice, filePath);
+      const contentFingerprint = invoicePageContentFingerprint(invoice);
       const existingPage = findTransactionByPageFingerprint(fingerprint);
       if (existingPage) {
         await message.reply(`This invoice page was already processed for **${existingPage.invoice.orderId || existingPage.id.slice(0, 8)}**. No cards were added.`);
@@ -548,7 +555,10 @@ client.on(Events.MessageCreate, async (message: Message) => {
       const matchingOrderTransaction = invoice.orderId ? findTransactionByOrderId(invoice.orderId) : undefined;
       if (matchingOrderTransaction) {
         const fingerprint = await invoicePageFingerprint(invoice, filePath);
-        const duplicate = matchingOrderTransaction.pages.some((page) => page.fingerprint === fingerprint);
+        const duplicate = matchingOrderTransaction.pages.some((page) =>
+          page.fingerprint === fingerprint ||
+          (page.contentFingerprint && page.contentFingerprint === contentFingerprint)
+        );
         if (duplicate) {
           await message.reply("This invoice page was already attached to **" + (matchingOrderTransaction.invoice.orderId || matchingOrderTransaction.id.slice(0, 8)) + "**. No cards were added.");
           continue;
@@ -561,6 +571,7 @@ client.on(Events.MessageCreate, async (message: Message) => {
           attachmentName: attachment.name ?? "invoice",
           receivedAt: new Date().toISOString(),
           fingerprint,
+          contentFingerprint,
           lineCount: invoice.lineItems.length,
         };
         matchingOrderTransaction.catalog = continuationPlan.catalog;
@@ -592,6 +603,7 @@ client.on(Events.MessageCreate, async (message: Message) => {
           attachmentName: attachment.name ?? "invoice",
           receivedAt: new Date().toISOString(),
           fingerprint,
+          contentFingerprint,
           invoice,
           catalog: resolved.catalog,
           plan: resolved.plan,
@@ -626,6 +638,7 @@ client.on(Events.MessageCreate, async (message: Message) => {
           attachmentName: attachment.name ?? "invoice",
           receivedAt: new Date().toISOString(),
           fingerprint: await invoicePageFingerprint(invoice, filePath),
+          contentFingerprint,
           lineCount: invoice.lineItems.length,
         },
       );
@@ -783,6 +796,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         attachmentName: continuation.attachmentName,
         receivedAt: continuation.receivedAt,
         fingerprint: continuation.fingerprint,
+        contentFingerprint: continuation.contentFingerprint,
         lineCount: continuation.invoice.lineItems.length,
       };
 
