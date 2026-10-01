@@ -388,7 +388,13 @@ test("detects a pending reupload when OCR loses invoice identity", () => {
     rows: pending.plan.rows.map((row) => ({
       ...row,
       sourceMessageId: "ocr-loss-reupload",
-      input: { ...row.input, cardNumber: "1" },
+      input: {
+        ...row.input,
+        cardNumber: "1",
+        condition: "",
+        unitCost: (row.input.unitCost ?? 0) + 0.01,
+        totalCost: (row.input.totalCost ?? 0) + 0.01,
+      },
     })),
     insertable: 2,
     pendingReview: 0,

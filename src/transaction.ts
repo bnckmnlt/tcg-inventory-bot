@@ -223,20 +223,22 @@ export function findTransactionsByPageDocumentFingerprint(documentFingerprint: s
 }
 
 function normalizeSimilarityPart(value: string | number | null | undefined): string {
-  return String(value ?? "").trim().toLowerCase();
+  return String(value ?? "")
+    .normalize("NFKC")
+    .trim()
+    .toLowerCase()
+    .replace(/\\s+/g, " ");
 }
 
 function invoiceLineSimilarityKey(row: IngestionPlan["rows"][number]): string {
   const input = row.input;
+  // OCR can legitimately vary on card number, price, condition wording, or
+  // minor formatting on a re-upload. Use the stable purchase fields that are
+  // least likely to change between scans; card number is deliberately excluded.
   return [
     normalizeSimilarityPart(input.cardName),
     normalizeSimilarityPart(input.setSeries),
-    normalizeSimilarityPart(input.condition),
-    normalizeSimilarityPart(input.language),
-    normalizeSimilarityPart(input.variantPrinting),
     normalizeSimilarityPart(input.qtyPurchased),
-    normalizeSimilarityPart(input.unitCost),
-    normalizeSimilarityPart(input.totalCost),
   ].join("|");
 }
 
