@@ -45,7 +45,7 @@ import {
   findTransactionByOrderId,
   findTransactionByPageFingerprint,
   findTransactionsByPageDocumentFingerprint,
-  findPendingTransactionsByPageFilename,
+  findTransactionsByPageFilename,
   findTransactionByPageSimilarity,
   findPendingTransactionByPageSimilarity,
   setTransactionStatus,
@@ -607,22 +607,27 @@ client.on(Events.MessageCreate, async (message: Message) => {
       const resolved = await buildPlan(invoice, sourceMessageId, catalog);
 
       // If OCR or file-content fingerprints change, the original attachment
-      // filename can still provide a useful duplicate signal. It is only
-      // authoritative when exactly one pending invoice has that filename;
-      // shared/generic filenames are treated as ambiguous and never guessed.
+      // filename can still provide a useful duplicate signal. This includes
+      // STORED history so a re-upload cannot revive a completed transaction.
+      // Shared/generic filenames are treated as ambiguous and never guessed.
       const attachmentName = attachment.name ?? "invoice";
-      const filenameDuplicateCandidates = findPendingTransactionsByPageFilename(
+      const filenameDuplicateCandidates = findTransactionsByPageFilename(
         attachmentName,
         invoice.lineItems.length,
       );
 
       if (filenameDuplicateCandidates.length === 1) {
         const filenameDuplicate = filenameDuplicateCandidates[0];
-        await message.reply(
-          "This invoice page matches the existing pending invoice **" +
-          (filenameDuplicate.invoice.orderId || filenameDuplicate.id.slice(0, 8)) +
-          "** by attachment filename. No cards were added. Use **/review** to reopen the existing invoice.",
-        );
+        const label = filenameDuplicate.invoice.orderId || filenameDuplicate.id.slice(0, 8);
+        if (filenameDuplicate.status === "STORED") {
+          await message.reply(
+            "This invoice page matches an already stored invoice **" + label + "** by attachment filename. No cards were added.",
+          );
+        } else {
+          await message.reply(
+            "This invoice page matches the existing pending invoice **" + label + "** by attachment filename. No cards were added. Use **/review** to reopen the existing invoice.",
+          );
+        }
         continue;
       }
 
@@ -630,7 +635,7 @@ client.on(Events.MessageCreate, async (message: Message) => {
         await message.reply(
           "This attachment filename matches **" +
           filenameDuplicateCandidates.length +
-          "** pending invoices, so I won't guess which one it belongs to. Use **/review** to select the correct invoice instead. No cards were added.",
+          "** existing invoices, so I won't guess which one it belongs to. Use **/review** to select the correct invoice instead. No cards were added.",
         );
         continue;
       }

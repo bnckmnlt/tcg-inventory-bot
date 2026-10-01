@@ -15,6 +15,7 @@ const {
   findTransactionByOrderId,
   findTransactionByPageFingerprint,
   findTransactionsByPageDocumentFingerprint,
+  findTransactionsByPageFilename,
   findPendingTransactionsByPageFilename,
   findTransactionByPageSimilarity,
   findPendingTransactionByPageSimilarity,
@@ -621,6 +622,105 @@ test("does not guess when a filename is shared by multiple pending invoices", ()
     findPendingTransactionsByPageFilename("invoice.jpg", 2).map((item) => item.id),
     [first.id, second.id],
   );
+});
+
+test("detects a stored invoice reupload by filename even when file fingerprint changes", () => {
+  const stored = createPendingTransaction(
+    { ...transaction().invoice, orderId: "STORED-FILENAME-001" },
+    "stored-filename-source",
+    ["TCGPlayer Invoice 2026-10-01.jpg"],
+    sampleCatalog,
+    emptyPlan(),
+    {
+      id: "stored-filename-page",
+      sourceMessageId: "stored-filename-source",
+      attachmentName: "TCGPlayer Invoice 2026-10-01.jpg",
+      receivedAt: "2026-10-01T07:00:00.000Z",
+      fingerprint: "stored-filename-original",
+      contentFingerprint: "stored-filename-content-original",
+      documentFingerprint: "stored-filename-document-original",
+      lineCount: 16,
+    },
+  );
+  setTransactionStatus(stored, "STORED");
+
+  const matches = findTransactionsByPageFilename(" tcgplayer  invoice 2026-10-01.jpg ", 16);
+  assert.deepEqual(matches.map((item) => item.id), [stored.id]);
+  assert.equal(matches[0].status, "STORED");
+
+  // The pending-only helper must not treat historical stored data as an open review.
+  assert.deepEqual(findPendingTransactionsByPageFilename("TCGPlayer Invoice 2026-10-01.jpg", 16), []);
+
+  // A changed fingerprint is not enough to make the stored transaction mutable.
+  assert.equal(findTransactionByPageFingerprint("stored-filename-reencoded"), undefined);
+  assert.equal(stored.status, "STORED");
+  assert.equal(stored.pages.length, 1);
+});
+
+test("blocks a stored reupload before order-ID continuation when all file fingerprints change", () => {
+  const stored = createPendingTransaction(
+    { ...transaction().invoice, orderId: "STORED-REUPLOAD-GUARD" },
+    "stored-reupload-guard-source",
+    ["stored-page-1.jpg"],
+    sampleCatalog,
+    {
+      rows: [{
+        ingestionKey: "stored-page-1:line:1",
+        sourceMessageId: "stored-reupload-guard-source",
+        sourceLine: 1,
+        action: "INSERT" as const,
+        state: "EXACT" as const,
+        input: {
+          inventoryId: "IMG-stored-page-1-001",
+          cardName: "Stored Reupload Guard Card",
+          setSeries: "Stored Reupload Guard Set",
+          cardNumber: "001",
+          condition: "Near Mint",
+          language: "English",
+          variantPrinting: "Normal",
+          remainingQty: 1,
+          qtyPurchased: 1,
+        },
+        reasons: [],
+      }],
+      insertable: 1,
+      pendingReview: 0,
+      skipped: 0,
+    },
+    {
+      id: "stored-reupload-guard-page",
+      sourceMessageId: "stored-reupload-guard-source",
+      attachmentName: "stored-page-1.jpg",
+      receivedAt: "2026-10-01T03:00:00.000Z",
+      fingerprint: "stored-original-file",
+      contentFingerprint: "stored-original-content",
+      documentFingerprint: "stored-original-document",
+      lineCount: 1,
+    },
+  );
+  setTransactionStatus(stored, "STORED");
+
+  // Simulate the same order being extracted from a re-upload whose file,
+  // content, and document fingerprints are all different. The stable
+  // purchase lines still identify it as the same already-stored page.
+  const reuploadPlan = {
+    ...stored.plan,
+    rows: stored.plan.rows.map((row) => ({
+      ...row,
+      ingestionKey: "reupload:line:1",
+      sourceMessageId: "reupload-source",
+    })),
+  };
+
+  assert.equal(findTransactionByOrderId("stored-reupload-guard")?.id, stored.id);
+  assert.equal(findTransactionByPageFingerprint("reupload-file-fingerprint"), undefined);
+  assert.equal(
+    findTransactionByPageSimilarity(reuploadPlan)?.id,
+    stored.id,
+    "the duplicate guard must catch the page before order-ID continuation is considered",
+  );
+  assert.equal(stored.status, "STORED");
+  assert.equal(stored.pages.length, 1);
 });
 
 test("detects a reuploaded stored page by document fingerprint", () => {

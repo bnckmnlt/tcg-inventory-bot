@@ -231,24 +231,37 @@ function normalizeAttachmentName(value: string): string {
 }
 
 /**
- * Finds pending invoices that already contain a page with the same attachment
- * filename. Filename is a secondary duplicate signal: it is useful when OCR
- * or file-content fingerprints change, but it is deliberately returned as a
- * candidate list so callers never guess when multiple invoices share a name.
+ * Finds non-rejected invoice history that already contains a page with the
+ * same attachment filename. Filename is a secondary duplicate signal: it is
+ * useful when OCR or file-content fingerprints change, including for STORED
+ * transactions. The full candidate list is returned so callers never guess
+ * when multiple invoices share a name.
  */
-export function findPendingTransactionsByPageFilename(
+export function findTransactionsByPageFilename(
   attachmentName: string,
   lineCount?: number,
 ): PendingTransaction[] {
   const normalized = normalizeAttachmentName(attachmentName);
   if (!normalized) return [];
 
-  return listPendingTransactions().filter((transaction) =>
-    transaction.pages.some((page) =>
+  return [...pendingTransactions.values()]
+    .filter((transaction) => transaction.status !== "REJECTED")
+    .filter((transaction) => transaction.pages.some((page) =>
       normalizeAttachmentName(page.attachmentName) === normalized &&
       (lineCount === undefined || page.lineCount === lineCount),
-    ),
-  );
+    ));
+}
+
+/**
+ * Backward-compatible pending-only filename lookup for callers that need to
+ * distinguish an open review from historical duplicate detection.
+ */
+export function findPendingTransactionsByPageFilename(
+  attachmentName: string,
+  lineCount?: number,
+): PendingTransaction[] {
+  return findTransactionsByPageFilename(attachmentName, lineCount)
+    .filter((transaction) => transaction.status !== "STORED");
 }
 
 function normalizeSimilarityPart(value: string | number | null | undefined): string {
