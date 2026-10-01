@@ -22,6 +22,17 @@ export interface InvoicePage {
   lineCount: number;
 }
 
+export interface PendingContinuation {
+  id: string;
+  sourceMessageId: string;
+  attachmentName: string;
+  receivedAt: string;
+  fingerprint: string;
+  invoice: InvoiceData;
+  catalog: Catalog;
+  plan: IngestionPlan;
+}
+
 export interface PendingTransaction {
   id: string;
   invoice: InvoiceData;
@@ -34,6 +45,7 @@ export interface PendingTransaction {
 }
 
 const pendingTransactions = new Map<string, PendingTransaction>();
+const pendingContinuations = new Map<string, PendingContinuation>();
 let activeTransactionId: string | undefined;
 const pendingTransactionsPath = process.env.INVOICE_TEST_MODE === "true"
   ? path.resolve(".test-runtime/pending-transactions.json")
@@ -45,6 +57,7 @@ function savePendingTransactions(): void {
     JSON.stringify({
       activeTransactionId,
       transactions: [...pendingTransactions.values()],
+      continuations: [...pendingContinuations.values()],
     }, null, 2) + "\n",
     "utf8",
   );
@@ -55,9 +68,17 @@ function loadPendingTransactions(): void {
   try {
     const raw = readFileSync(pendingTransactionsPath, "utf8").trim();
     if (!raw) return;
-    const parsed = JSON.parse(raw) as PendingTransaction[] | { activeTransactionId?: string; transactions?: PendingTransaction[] };
+    const parsed = JSON.parse(raw) as PendingTransaction[] | {
+      activeTransactionId?: string;
+      transactions?: PendingTransaction[];
+      continuations?: PendingContinuation[];
+    };
     const transactions = Array.isArray(parsed) ? parsed : (parsed.transactions ?? []);
+    const continuations = Array.isArray(parsed) ? [] : (parsed.continuations ?? []);
     activeTransactionId = Array.isArray(parsed) ? undefined : parsed.activeTransactionId;
+    for (const continuation of continuations) {
+      if (continuation?.id) pendingContinuations.set(continuation.id, continuation);
+    }
     for (const transaction of transactions) {
       if (!transaction?.id) continue;
       transaction.status ??= transaction.plan.rows.some((row) => row.input.reviewRequired)
@@ -157,7 +178,7 @@ export function getPendingTransactionByPurchaseIdentity(
 
   if (incomingKeys.size === 0) return undefined;
 
-  return [...pendingTransactions.values()].find((transaction) => {
+  return listPendingTransactions().find((transaction) => {
     const existingKeys = pendingPurchaseKeys(transaction);
     for (const key of incomingKeys) {
       if (existingKeys.has(key)) return true;
@@ -168,6 +189,37 @@ export function getPendingTransactionByPurchaseIdentity(
 
 export function listPendingTransactions(): PendingTransaction[] {
   return [...pendingTransactions.values()].filter((transaction) => transaction.status !== "STORED" && transaction.status !== "REJECTED");
+}
+
+export function findTransactionByPageFingerprint(fingerprint: string): PendingTransaction | undefined {
+  if (!fingerprint) return undefined;
+  return [...pendingTransactions.values()].find((transaction) =>
+    transaction.pages.some((page) => page.fingerprint === fingerprint),
+  );
+}
+
+export function createPendingContinuation(continuation: PendingContinuation): void {
+  pendingContinuations.set(continuation.id, continuation);
+  savePendingTransactions();
+}
+
+export function getPendingContinuation(id: string): PendingContinuation | undefined {
+  return pendingContinuations.get(id);
+}
+
+export function listPendingContinuations(): PendingContinuation[] {
+  return [...pendingContinuations.values()];
+}
+
+export function removePendingContinuation(id: string): void {
+  if (!pendingContinuations.delete(id)) return;
+  savePendingTransactions();
+}
+
+export function findTransactionByOrderId(orderId: string): PendingTransaction | undefined {
+  const normalized = orderId.trim().toLowerCase();
+  if (!normalized) return undefined;
+  return listPendingTransactions().find((transaction) => transaction.invoice.orderId?.trim().toLowerCase() === normalized);
 }
 
 export function getActiveTransaction(): PendingTransaction | undefined {

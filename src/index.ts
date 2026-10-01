@@ -16,8 +16,9 @@ import {
   TextInputStyle,
 } from "discord.js";
 import path from "node:path";
+import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { copyFile, mkdir, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import { createInventoryBackup } from "./inventory/backup.js";
 import { downloadInvoice } from "./invoice.js";
 import { extractInvoice } from "./extract.js";
@@ -34,8 +35,16 @@ import {
   getPendingTransactionBySourceMessageId,
   getPendingTransactionByPurchaseIdentity,
   listPendingTransactions,
-  removePendingTransaction,
   savePendingTransaction,
+  createPendingContinuation,
+  getPendingContinuation,
+  listPendingContinuations,
+  removePendingContinuation,
+  appendInvoicePage,
+  findTransactionByOrderId,
+  findTransactionByPageFingerprint,
+  setTransactionStatus,
+  type InvoicePage,
 } from "./transaction.js";
 
 const token = process.env.DISCORD_TOKEN;
@@ -74,6 +83,41 @@ const client = new Client({
     GatewayIntentBits.MessageContent,
   ],
 });
+
+function invoiceHasIdentity(invoice: Awaited<ReturnType<typeof extractInvoice>>): boolean {
+  return Boolean(invoice.orderId || invoice.seller || invoice.purchaseDate);
+}
+
+function mergeContinuationInvoice(
+  target: Awaited<ReturnType<typeof extractInvoice>>,
+  continuation: Awaited<ReturnType<typeof extractInvoice>>,
+): Awaited<ReturnType<typeof extractInvoice>> {
+  return {
+    ...target,
+    subtotal: target.subtotal ?? continuation.subtotal,
+    shipping: target.shipping ?? continuation.shipping,
+    tax: target.tax ?? continuation.tax,
+    total: target.total ?? continuation.total,
+    currency: target.currency ?? continuation.currency,
+    uncertainFields: [...target.uncertainFields, ...continuation.uncertainFields],
+    lineItems: continuation.lineItems,
+  };
+}
+
+async function invoicePageFingerprint(invoice: Awaited<ReturnType<typeof extractInvoice>>): Promise<string> {
+  const normalized = JSON.stringify(invoice.lineItems.map((line) => ({
+    productName: line.productName?.trim() ?? null,
+    setName: line.setName?.trim() ?? null,
+    cardNumber: line.cardNumber?.trim() ?? null,
+    condition: line.condition?.trim() ?? null,
+    language: line.language?.trim() ?? null,
+    variant: line.variant?.trim() ?? null,
+    quantity: line.quantity ?? null,
+    unitPrice: line.unitPrice ?? null,
+    totalPrice: line.totalPrice ?? null,
+  })));
+  return createHash("sha256").update(normalized).digest("hex");
+}
 
 function formatMoney(amount: number | null, currency: string | null): string {
   if (amount === null) return "Unknown";
@@ -243,12 +287,38 @@ function buildPendingReviewMenu() {
   const transactions = listPendingTransactions().slice(0, 25);
   const menu = new StringSelectMenuBuilder()
     .setCustomId("invoice:review-select")
-    .setPlaceholder("Select a pending invoice");
+    .setPlaceholder("Select an invoice");
 
   for (const transaction of transactions) {
     const invoice = transaction.invoice;
     const label = (invoice.orderId || invoice.seller || ("Invoice " + transaction.id.slice(0, 8))).slice(0, 100);
-    const description = ((invoice.purchaseDate || "Unknown date") + " • " + transaction.plan.rows.length + " line(s) • " + transaction.id.slice(0, 8)).slice(0, 100);
+    const description = ((transaction.status.replaceAll("_", " ")) + " • " + transaction.plan.rows.length + " line(s) • " + transaction.pages.length + " page(s)").slice(0, 100);
+    menu.addOptions(
+      new StringSelectMenuOptionBuilder()
+        .setLabel(label)
+        .setDescription(description)
+        .setValue(transaction.id),
+    );
+  }
+
+  return new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(menu);
+}
+
+function buildContinuationMenu(continuationId: string) {
+  const transactions = listPendingTransactions()
+    .filter((transaction) => transaction.status !== "STORED" && transaction.status !== "REJECTED")
+    .slice(0, 25);
+  const menu = new StringSelectMenuBuilder()
+    .setCustomId(`invoice:continuation-select:${continuationId}`)
+    .setPlaceholder("Select the invoice this page belongs to");
+
+  for (const transaction of transactions) {
+    const invoice = transaction.invoice;
+    const status = transaction.status.replaceAll("_", " ");
+    const label = (invoice.orderId || invoice.seller || ("Invoice " + transaction.id.slice(0, 8))).slice(0, 100);
+    const description = (
+      `${status} • ${transaction.plan.rows.length} card line(s) • ${transaction.pages.length} page(s)`
+    ).slice(0, 100);
     menu.addOptions(
       new StringSelectMenuOptionBuilder()
         .setLabel(label)
@@ -357,6 +427,7 @@ async function buildPlan(
   invoice: Awaited<ReturnType<typeof extractInvoice>>,
   sourceMessageId: string,
   catalog: Catalog,
+  sourceLineOffset = 0,
 ): Promise<{ catalog: Catalog; plan: IngestionPlan }> {
   const store = await createJsonInventoryStore(inventoryPath);
   let workingCatalog = catalog;
@@ -375,7 +446,7 @@ async function buildPlan(
     invoice,
     sourceMessageId,
     existingKeys,
-    { allowMissingCardNumber: true },
+    { allowMissingCardNumber: true, sourceLineOffset },
   );
 
   const runtime = new TCGdexRuntime();
@@ -412,7 +483,7 @@ async function buildPlan(
     invoice,
     sourceMessageId,
     existingKeys,
-    { allowMissingCardNumber: true },
+    { allowMissingCardNumber: true, sourceLineOffset },
   );
 
   if (enriched) await saveCatalog(workingCatalog);
@@ -428,7 +499,7 @@ client.once(Events.ClientReady, async (readyClient) => {
     const existing = commands.find((command) => command.name === "review");
     const commandData = {
       name: "review",
-      description: "Open a pending invoice review",
+      description: "Open an invoice for review or continuation",
     };
     if (existing) await existing.edit(commandData);
     else await readyClient.application.commands.create(commandData, guild.id);
@@ -456,6 +527,12 @@ client.on(Events.MessageCreate, async (message: Message) => {
 
       const catalog = await loadCatalog();
       const sourceMessageId = `DISCORD-${message.id}-${attachment.id}`;
+      const fingerprint = await invoicePageFingerprint(invoice);
+      const existingPage = findTransactionByPageFingerprint(fingerprint);
+      if (existingPage) {
+        await message.reply(`This invoice page was already processed for **${existingPage.invoice.orderId || existingPage.id.slice(0, 8)}**. No cards were added.`);
+        continue;
+      }
       const existingTransaction = getPendingTransactionBySourceMessageId(sourceMessageId);
       if (existingTransaction) {
         await message.reply(`This invoice is already pending review (Transaction ${existingTransaction.id.slice(0, 8)}). Use **Review Now** or **Review Later** on the existing ticket.`);
@@ -463,6 +540,30 @@ client.on(Events.MessageCreate, async (message: Message) => {
       }
 
       const resolved = await buildPlan(invoice, sourceMessageId, catalog);
+
+      const matchingOrderTransaction = invoice.orderId ? findTransactionByOrderId(invoice.orderId) : undefined;
+      if (matchingOrderTransaction) {
+        const fingerprint = await invoicePageFingerprint(invoice);
+        const duplicate = matchingOrderTransaction.pages.some((page) => page.fingerprint === fingerprint);
+        if (duplicate) {
+          await message.reply("This invoice page was already attached to **" + (matchingOrderTransaction.invoice.orderId || matchingOrderTransaction.id.slice(0, 8)) + "**. No cards were added.");
+          continue;
+        }
+        const mergedInvoice = mergeContinuationInvoice(matchingOrderTransaction.invoice, invoice);
+        const continuationPlan = await buildPlan(mergedInvoice, sourceMessageId, matchingOrderTransaction.catalog, matchingOrderTransaction.plan.rows.length);
+        const page: InvoicePage = {
+          id: sourceMessageId,
+          sourceMessageId,
+          attachmentName: attachment.name ?? "invoice",
+          receivedAt: new Date().toISOString(),
+          fingerprint,
+          lineCount: invoice.lineItems.length,
+        };
+        matchingOrderTransaction.catalog = continuationPlan.catalog;
+        appendInvoicePage(matchingOrderTransaction, page, continuationPlan.plan, mergedInvoice);
+        await message.reply("Continuation attached to **" + (matchingOrderTransaction.invoice.orderId || matchingOrderTransaction.id.slice(0, 8)) + "**. The invoice now has **" + matchingOrderTransaction.plan.rows.length + "** card lines across **" + matchingOrderTransaction.pages.length + "** page(s).");
+        continue;
+      }
 
       const existingPurchaseTransaction = getPendingTransactionByPurchaseIdentity(resolved.plan);
       if (existingPurchaseTransaction) {
@@ -472,12 +573,51 @@ client.on(Events.MessageCreate, async (message: Message) => {
         continue;
       }
 
+      const continuationCandidates = listPendingTransactions();
+      if (!invoiceHasIdentity(invoice) && invoice.lineItems.length > 0 && continuationCandidates.length > 0) {
+        const fingerprint = await invoicePageFingerprint(invoice);
+        const duplicateContinuation = listPendingContinuations().some((pending) => pending.fingerprint === fingerprint);
+        if (duplicateContinuation) {
+          await message.reply("This continuation page is already waiting for invoice selection. No cards were added.");
+          continue;
+        }
+
+        createPendingContinuation({
+          id: sourceMessageId,
+          sourceMessageId,
+          attachmentName: attachment.name ?? "invoice",
+          receivedAt: new Date().toISOString(),
+          fingerprint,
+          invoice,
+          catalog: resolved.catalog,
+          plan: resolved.plan,
+        });
+
+        await message.reply({
+          content: [
+            "📄 **Continuation page detected**",
+            "No invoice identity was found on this page. It contains **" + invoice.lineItems.length + "** card line(s).",
+            "Select the invoice this page belongs to below. The page will not be added until you select one.",
+          ].join("\n"),
+          components: [buildContinuationMenu(sourceMessageId)],
+        });
+        continue;
+      }
+
       const transaction = createPendingTransaction(
         invoice,
         sourceMessageId,
         [attachment.name ?? "invoice"],
         resolved.catalog,
         resolved.plan,
+        {
+          id: sourceMessageId,
+          sourceMessageId,
+          attachmentName: attachment.name ?? "invoice",
+          receivedAt: new Date().toISOString(),
+          fingerprint: await invoicePageFingerprint(invoice),
+          lineCount: invoice.lineItems.length,
+        },
       );
 
       const reviewEmbeds = buildReviewEmbeds(invoice, resolved.plan, transaction.id);
@@ -512,8 +652,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
     const shown = transactions.slice(0, 25);
     await interaction.reply({
       content: shown.length < transactions.length
-        ? "Select a pending invoice below. Showing the first " + shown.length + " of " + transactions.length + "."
-        : "Select a pending invoice below.",
+        ? "Select an invoice below. Showing the first " + shown.length + " of " + transactions.length + "."
+        : "Select an invoice below.",
       components: [buildPendingReviewMenu()],
       flags: MessageFlags.Ephemeral,
     });
@@ -558,6 +698,86 @@ client.on(Events.InteractionCreate, async (interaction) => {
           flags: MessageFlags.Ephemeral,
         });
       }
+    }
+    return;
+  }
+
+  if (interaction.isStringSelectMenu() && interaction.customId.startsWith("invoice:continuation-select:")) {
+    const continuationId = interaction.customId.split(":")[2];
+    const transactionId = interaction.values[0];
+    const continuation = getPendingContinuation(continuationId);
+    const transaction = getPendingTransaction(transactionId);
+
+    if (!continuation) {
+      await interaction.update({
+        content: "That continuation page is no longer waiting for invoice selection.",
+        components: [],
+      });
+      return;
+    }
+
+    if (!transaction) {
+      await interaction.update({
+        content: "That invoice is no longer available for continuation.",
+        components: [],
+      });
+      return;
+    }
+
+    const duplicate = transaction.pages.some((page) => page.fingerprint === continuation.fingerprint);
+    if (duplicate) {
+      removePendingContinuation(continuationId);
+      await interaction.update({
+        content: "This continuation page was already attached to the selected invoice. No cards were added.",
+        components: [],
+      });
+      return;
+    }
+
+    await interaction.deferUpdate();
+
+    try {
+      const mergedInvoice = mergeContinuationInvoice(transaction.invoice, continuation.invoice);
+      const resolved = await buildPlan(
+        mergedInvoice,
+        continuation.sourceMessageId,
+        transaction.catalog,
+        transaction.plan.rows.length,
+      );
+
+      const page: InvoicePage = {
+        id: continuation.id,
+        sourceMessageId: continuation.sourceMessageId,
+        attachmentName: continuation.attachmentName,
+        receivedAt: continuation.receivedAt,
+        fingerprint: continuation.fingerprint,
+        lineCount: continuation.invoice.lineItems.length,
+      };
+
+      transaction.catalog = resolved.catalog;
+      appendInvoicePage(transaction, page, resolved.plan, mergedInvoice);
+      removePendingContinuation(continuationId);
+
+      await interaction.editReply({
+        content: [
+          "✅ **Continuation attached**",
+          "",
+          "Invoice: " + (transaction.invoice.orderId || transaction.id.slice(0, 8)),
+          "Status: **" + transaction.status.replaceAll("_", " ") + "**",
+          "Pages: **" + transaction.pages.length + "**",
+          "Card lines: **" + transaction.plan.rows.length + "**",
+          transaction.plan.pendingReview > 0
+            ? "Review issues: **" + transaction.plan.pendingReview + "**"
+            : "Review issues: **0**",
+        ].join("\n"),
+        components: [],
+      });
+    } catch (error) {
+      console.error("Failed to attach invoice continuation:", error);
+      await interaction.editReply({
+        content: "I couldn't attach that continuation page. It remains unassigned; use the dropdown again or re-upload it.",
+        components: [buildContinuationMenu(continuationId)],
+      });
     }
     return;
   }
@@ -674,7 +894,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
   }
 
   if (action === "reject") {
-    removePendingTransaction(transactionId);
+    setTransactionStatus(transaction, "REJECTED");
     await interaction.update({
       content: `❌ **Invoice rejected** — transaction ${transactionId.slice(0, 8)} was not stored.`,
       components: [],
@@ -716,7 +936,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       const workbookStatus = await persistWorkbookIfConfigured(transaction.invoice, transaction.plan);
       const currentInventoryStore = await createJsonInventoryStore(inventoryPath);
       const applied = await currentInventoryStore.apply(transaction.plan.rows);
-      removePendingTransaction(transactionId);
+      setTransactionStatus(transaction, "STORED");
 
       await interaction.editReply({
         content: [
