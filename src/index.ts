@@ -268,7 +268,7 @@ function buildReviewEmbeds(
 
       cardEmbed.addFields({
         name: truncateDiscord(
-          `${index}. ${row.input.cardName || "Unknown card"} — ${row.input.cardNumber || "Card No. unknown"} — ${row.input.variantPrinting || "Variant unknown"} — ${row.action}`,
+          `${index}. ${row.input.cardName || "Unknown card"} — ${row.input.rarity || "Rarity unknown"} — ${row.input.cardNumber || "Card No. unknown"} — ${row.input.variantPrinting || "Variant unknown"} — ${row.action}`,
           256,
         ),
         value: truncateDiscord(
@@ -378,6 +378,7 @@ function buildCardNumberModal(
   rowIndex: number,
   cardName: string,
   setName: string,
+  rarity: string,
   currentValue: string,
 ) {
   const input = new TextInputBuilder()
@@ -395,7 +396,7 @@ function buildCardNumberModal(
 
   return new ModalBuilder()
     .setCustomId(`invoice:card-number:${transactionId}:${rowIndex}`)
-    .setTitle(`Resolve: ${cardName} — ${setName}`.slice(0, 45))
+    .setTitle(`Resolve: ${cardName} — ${rarity} — ${setName}`.slice(0, 45))
     .addComponents(new ActionRowBuilder<TextInputBuilder>().addComponents(input));
 }
 
@@ -965,14 +966,18 @@ client.on(Events.InteractionCreate, async (interaction) => {
       ...(row.input.resolutionReasons ?? []),
       `Card number manually confirmed in Discord review: ${value}.`,
     ];
+
+    // A modal submit must be acknowledged quickly. Persist first, then edit
+    // the deferred ephemeral response so Discord does not surface a generic
+    // "Something went wrong" interaction failure when storage is successful.
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
     savePendingTransaction(transaction);
 
     const remaining = transaction.plan.rows.filter((candidate) => candidate.input.reviewRequired);
-    await interaction.reply({
+    await interaction.editReply({
       content: remaining.length === 0
         ? `✅ **${row.input.cardName || "Card"}** updated to card number **${value}**. All review issues are resolved; the invoice is ready to store.`
         : `✅ **${row.input.cardName || "Card"}** updated to card number **${value}**. ${remaining.length} review issue(s) remain; use **Resolve Review Issues** again.`,
-      flags: MessageFlags.Ephemeral,
     });
 
     if (interaction.message) {
@@ -1045,6 +1050,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       flagged,
       row.input.cardName || "Card",
       row.input.setSeries || "Unknown set",
+      row.input.rarity || "Unknown rarity",
       row.input.cardNumber || "1",
     ));
     return;
