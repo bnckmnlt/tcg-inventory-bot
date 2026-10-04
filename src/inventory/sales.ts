@@ -1,4 +1,4 @@
-import { parseV2InventorySheet, type ParsedV2InventoryRow } from "./v2-workbook.js";
+import { buildInventoryCardKey, parseV2InventorySheet, type ParsedV2InventoryRow } from "./v2-workbook.js";
 import { readGoogleSheetInventoryRows } from "./google-sheets.js";
 
 export interface SaleDraft {
@@ -49,17 +49,39 @@ export function searchInventoryRows(rows: ParsedV2InventoryRow[], query: string)
 
 export function buildSelectedLotSalePlan(rows: ParsedV2InventoryRow[], draft: SaleDraft, existingSaleIds: string[]): SalePlan {
   const selected = rows.find(function (row) {
-    return row.inventoryId === draft.inventoryId && row.rawCardKey === draft.cardKey && row.remainingQty > 0;
+    return row.inventoryId === draft.inventoryId && buildInventoryCardKey(row) === draft.cardKey && row.remainingQty > 0;
   });
 
   if (!selected) {
     throw new Error("The selected inventory record is no longer available for this card. Search again.");
   }
   if (!Number.isInteger(draft.qtySold) || draft.qtySold < 1) throw new Error("Quantity must be a positive integer.");
+  if (!Number.isFinite(draft.sellPrice) || draft.sellPrice < 0) throw new Error("Sell price must be a non-negative number.");
+
   if (draft.qtySold > selected.remainingQty) {
     throw new Error("Only " + selected.remainingQty + " unit(s) remain in the selected inventory lot.");
   }
-  if (!Number.isFinite(draft.sellPrice) || draft.sellPrice < 0) throw new Error("Sell price must be a non-negative number.");
+
+  // A sale is tied to the exact inventory lot selected in Discord. Do not spill
+  // excess quantity into another lot, even if the card name is identical.
+  const lots = rows
+    .filter((row) => row.inventoryId === selected.inventoryId)
+    .sort((a, b) => {
+      if (!a.purchaseDate && b.purchaseDate) return -1;
+      if (a.purchaseDate && !b.purchaseDate) return 1;
+      if (a.purchaseDate && b.purchaseDate && a.purchaseDate !== b.purchaseDate) {
+        return a.purchaseDate.localeCompare(b.purchaseDate);
+      }
+      return a.inventoryId.localeCompare(b.inventoryId);
+    });
+  let remaining = draft.qtySold;
+  const allocations: SaleAllocation[] = [];
+  for (const lot of lots) {
+    if (remaining <= 0) break;
+    const qty = Math.min(remaining, lot.remainingQty);
+    allocations.push({ inventoryId: lot.inventoryId, qty, unitCost: lot.unitCost });
+    remaining -= qty;
+  }
 
   let maxSale = 0;
   for (const id of existingSaleIds) {
@@ -68,10 +90,7 @@ export function buildSelectedLotSalePlan(rows: ParsedV2InventoryRow[], draft: Sa
   }
   const saleId = "SALE-" + String(maxSale + 1).padStart(6, "0");
 
-  return {
-    saleId,
-    allocations: [{ inventoryId: selected.inventoryId, qty: draft.qtySold, unitCost: selected.unitCost }],
-  };
+  return { saleId, allocations };
 }
 
 export async function loadSaleInventory(useGoogleSheets: boolean, workbookRows?: ParsedV2InventoryRow[]): Promise<ParsedV2InventoryRow[]> {
@@ -101,13 +120,12 @@ export function parseAllocationSheetValues(values: unknown[][]): { allocationIds
 export function nextAllocationNumber(ids: string[]): number {
   let max = 0;
   for (const id of ids) {
-    const match = id.match(/^ALLOC-(\\d+)$/i);
+    const match = id.match(/^ALLOC-(\d+)$/i);
     if (match) max = Math.max(max, Number(match[1]));
   }
   return max + 1;
 }
 
 export function buildSaleCardKey(draft: SaleDraft): string {
-  return [draft.cardName, draft.setSeries, draft.cardNumber, draft.rarity || "", draft.condition, draft.language, draft.variantPrinting || "Normal"]
-    .map(function (value) { return value.trim(); }).join("|").toUpperCase();
+  return buildInventoryCardKey(draft);
 }

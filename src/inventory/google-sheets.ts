@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { createSign } from "node:crypto";
 import { readV2InventoryWorkbook } from "./read-xlsx.js";
-import { parseV2InventorySheet, V2_INVENTORY_HEADERS, type ParsedV2InventoryRow } from "./v2-workbook.js";
+import { buildInventoryCardKey, parseV2InventorySheet, V2_INVENTORY_HEADERS, type ParsedV2InventoryRow } from "./v2-workbook.js";
 import type { V2InventoryRow } from "./types.js";
 
 const SHEETS_SCOPE = "https://www.googleapis.com/auth/spreadsheets";
@@ -36,13 +36,24 @@ function loadConfig(): SheetsConfig {
     );
   }
 
-  const raw = rawJson
-    ? rawJson
-    : existsSync(credentialsPath!)
-      ? readFileSync(credentialsPath!, "utf8")
-      : "";
+  let raw: string;
+  if (rawJson) {
+    raw = rawJson;
+  } else if (existsSync(credentialsPath!)) {
+    raw = readFileSync(credentialsPath!, "utf8").trim();
+    if (!raw) {
+      throw new Error("Google service account credentials file is empty: " + credentialsPath);
+    }
+  } else {
+    throw new Error("Google service account credentials file was not found: " + credentialsPath);
+  }
 
-  const credentials = JSON.parse(raw) as GoogleServiceAccount;
+  let credentials: GoogleServiceAccount;
+  try {
+    credentials = JSON.parse(raw) as GoogleServiceAccount;
+  } catch {
+    throw new Error("Google service account credentials are not valid JSON. Check " + (credentialsPath || "GOOGLE_SERVICE_ACCOUNT_JSON") + ".");
+  }
   if (!credentials.client_email || !credentials.private_key) {
     throw new Error("Google service account JSON must contain client_email and private_key.");
   }
@@ -396,17 +407,36 @@ export async function writeSaleToGoogleSheets(input: GoogleSaleWriteInput): Prom
   const parsedInventory = parseV2InventorySheet([[], [], ...inventoryValues]);
   if (parsedInventory.issues.length > 0) throw new Error("Google Sheets Inventory has parser issues: " + parsedInventory.issues.map((issue) => issue.message).join(" | "));
 
-  const selected = parsedInventory.rows.find((row) => row.inventoryId === input.inventoryId && row.rawCardKey === input.cardKey && row.remainingQty > 0);
-  if (!selected) throw new Error("The selected inventory lot changed or is no longer available. Search again.");
+  const selected = parsedInventory.rows.find((row) => row.inventoryId === input.inventoryId && buildInventoryCardKey(row) === input.cardKey && row.remainingQty > 0);
+  if (!selected) throw new Error("The selected inventory record changed or is no longer available. Search again.");
   if (input.qtySold > selected.remainingQty) {
     throw new Error("Only " + selected.remainingQty + " unit(s) remain in the selected inventory lot.");
   }
 
-  const currentAllocations: Array<{ inventoryId: string; qty: number }> = [
-    { inventoryId: selected.inventoryId, qty: input.qtySold },
-  ];
-  if (currentAllocations.length !== input.allocations.length || currentAllocations.some((allocation, index) => allocation.inventoryId !== input.allocations[index].inventoryId || allocation.qty !== input.allocations[index].qty)) {
-    throw new Error("The selected inventory lot changed while this sale was waiting for confirmation. Search again and prepare the sale again.");
+  // Revalidate the exact lot selected by Discord. Never spill a sale into a
+  // different set/printing merely because the card name is the same.
+  const fifoLots = [selected]
+    .filter((row) => row.remainingQty > 0)
+    .sort((a, b) => {
+      if (!a.purchaseDate && b.purchaseDate) return -1;
+      if (a.purchaseDate && !b.purchaseDate) return 1;
+      if (a.purchaseDate && b.purchaseDate && a.purchaseDate !== b.purchaseDate) return a.purchaseDate.localeCompare(b.purchaseDate);
+      return a.inventoryId.localeCompare(b.inventoryId);
+    });
+  const availableQty = selected.remainingQty;
+  if (input.qtySold > availableQty) {
+    throw new Error("Only " + availableQty + " unit(s) remain in the selected inventory lot.");
+  }
+  let fifoRemaining = input.qtySold;
+  const expectedAllocations: Array<{ inventoryId: string; qty: number }> = [];
+  for (const lot of fifoLots) {
+    if (fifoRemaining <= 0) break;
+    const qty = Math.min(fifoRemaining, lot.remainingQty);
+    expectedAllocations.push({ inventoryId: lot.inventoryId, qty });
+    fifoRemaining -= qty;
+  }
+  if (expectedAllocations.length !== input.allocations.length || expectedAllocations.some((allocation, index) => allocation.inventoryId !== input.allocations[index].inventoryId || allocation.qty !== input.allocations[index].qty)) {
+    throw new Error("Inventory changed while this sale was waiting for confirmation. The FIFO allocation is no longer current; search again and prepare the sale again.");
   }
 
   const saleIds = salesValues.slice(1).map((row) => String(row[0] || "").trim()).filter(Boolean);
@@ -415,45 +445,58 @@ export async function writeSaleToGoogleSheets(input: GoogleSaleWriteInput): Prom
   // The Sheets API may omit trailing completely-empty rows from a range response.
   // Treat the first omitted row as the next append position instead of calling the
   // sheet full. Row 3 is the header; writable rows are 4..5000.
-  const findNextRow = (values: unknown[][], startRow: number, maxRow: number): number => {
-    for (let index = 0; index < values.length; index += 1) {
-      if (!String(values[index]?.[0] || "").trim()) return startRow + index;
-    }
-    const nextRow = startRow + values.length;
-    return nextRow <= maxRow ? nextRow : maxRow + 1;
+  // Do not calculate a writable row and then write to it. The Values API's
+  // exact-range update is vulnerable to another writer choosing the same row
+  // between the read and write. Use Sheets' append operation so Google assigns
+  // the next physical row atomically for each tab.
+  const appendValues = async (sheetName: string, values: unknown[][], columns: string): Promise<number> => {
+    const url = "https://sheets.googleapis.com/v4/spreadsheets/" + encodeURIComponent(config.spreadsheetId)
+      + "/values/" + encodeURIComponent("'" + sheetName.replace(/'/g, "''") + "'!A:" + columns)
+      + ":append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS&includeValuesInResponse=true";
+    const result = await sheetsRequest<{ updates?: { updatedRange?: string } }>(token, url, {
+      method: "POST",
+      body: JSON.stringify({ majorDimension: "ROWS", values }),
+    });
+    const updatedRange = result.updates?.updatedRange || "";
+    const match = updatedRange.match(/!(?:[A-Z]+)(\d+)(?::[A-Z]+\d+)?$/);
+    if (!match) throw new Error("Google Sheets did not return the appended row for " + sheetName + ".");
+    return Number(match[1]);
   };
-  const salesRow = findNextRow(salesValues, 3, 5000);
-  const allocationStart = findNextRow(allocationValues, 3, 5000);
-  if (salesRow > 5000 || allocationStart + input.allocations.length - 1 > 5000) throw new Error("Sales Log or Cost Allocations is at capacity.");
 
   // Keep Sales Log Card Key identical to the authoritative Inventory Card Key.
   // Store the selected lot's key as a value so the new row is immediately
   // usable even before a spreadsheet recalculation pass.
-  const authoritativeCardKey = selected.rawCardKey.trim();
-  if (!authoritativeCardKey) throw new Error("Selected inventory lot has no Card Key. Repair the Inventory row before recording a sale.");
+  const authoritativeCardKey = buildInventoryCardKey(selected);
+  if (!authoritativeCardKey) throw new Error("Selected inventory lot has incomplete card identity. Repair the Inventory row before recording a sale.");
+
+  if (process.env.GOOGLE_SHEETS_BACKUP_ON_WRITE === "true") {
+    await backupGoogleSheetTab(token, config.spreadsheetId, "Sales Log");
+    await backupGoogleSheetTab(token, config.spreadsheetId, "Cost Allocations");
+  }
+
+  const salesRow = await appendValues("Sales Log", [[input.saleId, authoritativeCardKey, input.inventoryId, input.cardName, input.setSeries, input.cardNumber, input.rarity || "", input.condition, input.language, input.variantPrinting || "Normal", input.dateSold, input.qtySold, input.sellPrice]], "M");
   const revenueFormula = "=IF(A" + salesRow + "=\"\",\"\",L" + salesRow + "*M" + salesRow + ")";
   const costFormula = "=IF(A" + salesRow + "=\"\",\"\",SUMIFS('Cost Allocations'!$G$4:$G$5000,'Cost Allocations'!$B$4:$B$5000,A" + salesRow + "))";
   const profitFormula = "=IF(A" + salesRow + "=\"\",\"\",N" + salesRow + "-O" + salesRow + ")";
   const checkFormula = "=IF(A" + salesRow + "=\"\",\"\",IF(SUMIFS('Cost Allocations'!$E$4:$E$5000,'Cost Allocations'!$B$4:$B$5000,A" + salesRow + ")=L" + salesRow + ",\"OK\",IF(SUMIFS('Cost Allocations'!$E$4:$E$5000,'Cost Allocations'!$B$4:$B$5000,A" + salesRow + ")=0,\"NOT ALLOCATED\",IF(SUMIFS('Cost Allocations'!$E$4:$E$5000,'Cost Allocations'!$B$4:$B$5000,A" + salesRow + ")<L" + salesRow + ",\"PARTIAL\",\"OVER-ALLOCATED\"))))";
-
   const data: Array<{ range: string; majorDimension: string; values: unknown[][] }> = [
-    { range: quotedSheetRange("Sales Log", "A" + salesRow + ":M" + salesRow), majorDimension: "ROWS", values: [[input.saleId, authoritativeCardKey, input.inventoryId, input.cardName, input.setSeries, input.cardNumber, input.rarity || "", input.condition, input.language, input.variantPrinting || "Normal", input.dateSold, input.qtySold, input.sellPrice]] },
     { range: quotedSheetRange("Sales Log", "N" + salesRow + ":P" + salesRow), majorDimension: "ROWS", values: [[revenueFormula, costFormula, profitFormula]] },
     { range: quotedSheetRange("Sales Log", "Q" + salesRow), majorDimension: "ROWS", values: [[input.notes || ""]] },
     { range: quotedSheetRange("Sales Log", "R" + salesRow), majorDimension: "ROWS", values: [[checkFormula]] },
   ];
+  const allocationRows: unknown[][] = [];
   const inventoryFormulaData: Array<{ range: string; majorDimension: string; values: unknown[][] }> = [];
 
   for (let index = 0; index < input.allocations.length; index += 1) {
     const allocation = input.allocations[index];
-    const row = allocationStart + index;
     const inventoryLot = parsedInventory.rows.find((candidate) => candidate.inventoryId === allocation.inventoryId);
     if (!inventoryLot) throw new Error("Selected inventory lot " + allocation.inventoryId + " no longer exists. Search again.");
     const unitCost = inventoryLot.unitCost;
     const allocatedCost = allocation.qty * unitCost;
     const allocatedRevenue = allocation.qty * input.sellPrice;
-    data.push({ range: quotedSheetRange("Cost Allocations", "A" + row + ":J" + row), majorDimension: "ROWS", values: [[allocation.allocationId, input.saleId, allocation.inventoryId, inventoryLot.rawCardKey, allocation.qty, unitCost, allocatedCost, allocatedRevenue, allocatedRevenue - allocatedCost, "Selected Lot"]] });
-    data.push({ range: quotedSheetRange("Cost Allocations", "L" + row), majorDimension: "ROWS", values: [["=IF(A" + row + "=\"\",\"\",IF(D" + row + "=\"ID NOT FOUND\",\"BAD INV ID\",IF(ISNA(MATCH(B" + row + ",'Sales Log'!$A$4:$A$5000,0)),\"BAD SALE ID\",IF(INDEX('Sales Log'!$B$4:$B$5000,MATCH(B" + row + ",'Sales Log'!$A$4:$A$5000,0))=D" + row + ",\"OK\",\"KEY MISMATCH\"))))"]] });
+    allocationRows.push([allocation.allocationId, input.saleId, allocation.inventoryId, buildInventoryCardKey(inventoryLot), allocation.qty, unitCost, allocatedCost, allocatedRevenue, allocatedRevenue - allocatedCost, "Selected Lot"]);
+    // The check formula is written after append so it can use the physical row
+    // returned by Google rather than a row guessed from a prior read.
     // Reassert the Inventory quantity formulas on the selected lot. This keeps
     // the workbook formula-driven while ensuring Google Sheets has formulas present
     // even on rows whose formulas were previously missing or stale.
@@ -472,12 +515,16 @@ export async function writeSaleToGoogleSheets(input: GoogleSaleWriteInput): Prom
     });
   }
 
-  if (process.env.GOOGLE_SHEETS_BACKUP_ON_WRITE === "true") {
-    await backupGoogleSheetTab(token, config.spreadsheetId, "Sales Log");
-    await backupGoogleSheetTab(token, config.spreadsheetId, "Cost Allocations");
-  }
   const writeUrl = "https://sheets.googleapis.com/v4/spreadsheets/" + encodeURIComponent(config.spreadsheetId) + "/values:batchUpdate";
   // Cost Allocations must exist before Inventory R:S recalculates from it.
+  const allocationStart = await appendValues("Cost Allocations", allocationRows, "J");
+  const allocationData: Array<{ range: string; majorDimension: string; values: unknown[][] }> = [];
+  for (let index = 0; index < input.allocations.length; index += 1) {
+    const row = allocationStart + index;
+    const keyCheck = "=IF(A" + row + "=\"\",\"\",IF(D" + row + "=\"ID NOT FOUND\",\"BAD INV ID\",IF(ISNA(MATCH(B" + row + ",'Sales Log'!$A$4:$A$5000,0)),\"BAD SALE ID\",IF(INDEX('Sales Log'!$B$4:$B$5000,MATCH(B" + row + ",'Sales Log'!$A$4:$A$5000,0))=D" + row + ",\"OK\",\"KEY MISMATCH\"))))";
+    allocationData.push({ range: quotedSheetRange("Cost Allocations", "L" + row), majorDimension: "ROWS", values: [[keyCheck]] });
+  }
+  data.push(...allocationData);
   await sheetsRequest(token, writeUrl, {
     method: "POST",
     body: JSON.stringify({ valueInputOption: "USER_ENTERED", data }),

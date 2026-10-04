@@ -29,7 +29,7 @@ import { TCGdexRuntime } from "./catalog/runtime.js";
 import type { Catalog } from "./catalog/types.js";
 import { planInvoiceIngestion, purchaseIdentityKeys, type IngestionPlan } from "./inventory/ingest.js";
 import { createJsonInventoryStore } from "./inventory/json-store.js";
-import { invoicePlanToWorkbookRows, persistInvoicePlanToWorkbookSafely } from "./inventory/workbook-persistence.js";
+import { invoicePlanToWorkbookRows, persistInvoicePlanToWorkbookSafely, persistSaleToWorkbook, readWorkbookIds } from "./inventory/workbook-persistence.js";
 import { appendInventoryRowsDirectToGoogleSheets, readGoogleSheetAllocationIds, readGoogleSheetInventoryRows, readGoogleSheetSaleIds, writeSaleToGoogleSheets } from "./inventory/google-sheets.js";
 import {
   createPendingTransaction,
@@ -53,7 +53,7 @@ import {
   setTransactionStatus,
   type InvoicePage,
 } from "./transaction.js";
-import { buildSelectedLotSalePlan, type SaleDraft } from "./inventory/sales.js";
+import { buildSaleCardKey, buildSelectedLotSalePlan, type SaleDraft } from "./inventory/sales.js";
 
 const token = process.env.DISCORD_TOKEN;
 const invoiceChannelId = process.env.INVOICE_CHANNEL_ID;
@@ -419,10 +419,25 @@ interface PendingSale {
   draft: SaleDraft;
   saleId: string;
   allocations: Array<{ inventoryId: string; qty: number; unitCost: number }>;
+  selectedRemainingQty: number;
   createdAt: number;
 }
 
 const pendingSales = new Map<string, PendingSale>();
+let salePersistenceLock: Promise<void> = Promise.resolve();
+
+async function withSalePersistenceLock<T>(operation: () => Promise<T>): Promise<T> {
+  const previous = salePersistenceLock;
+  let release!: () => void;
+  salePersistenceLock = new Promise<void>((resolve) => { release = resolve; });
+  await previous;
+  try {
+    return await operation();
+  } finally {
+    release();
+  }
+}
+
 // Search results are cached briefly so selecting a result can open the Discord
 // modal immediately. Discord gives component interactions only a short response
 // window, while Google Sheets reads can exceed it.
@@ -964,7 +979,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     const query = interaction.fields.getTextInputValue("sale-search").trim();
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
     try {
-      const rows = process.env.GOOGLE_SHEETS_SYNC === "true"
+      const rows = process.env.GOOGLE_SHEETS_SYNC === "true" && !invoiceTestMode
         ? await readGoogleSheetInventoryRows()
         : readV2InventoryWorkbook(workbookPath).rows;
       const { available, row } = buildSaleInventoryMenu(rows, query);
@@ -996,7 +1011,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
       });
     } catch (error) {
       console.error("Failed to search inventory for sale:", error);
-      await interaction.editReply({ content: "I couldn't read the Inventory sheet right now. Check the bot logs." });
+      const message = error instanceof Error ? error.message : String(error);
+      const hint = message.includes("credentials file") || message.includes("service account credentials")
+        ? "\n\nGoogle Sheets is enabled, but the service-account credentials are missing or invalid. Check GOOGLE_SERVICE_ACCOUNT_JSON_PATH in .env."
+        : "";
+      await interaction.editReply({ content: "I couldn't read the Inventory sheet right now." + hint });
     }
     return;
   }
@@ -1010,7 +1029,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     const inventoryId = interaction.customId.slice("sale:entry:".length);
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
     try {
-      const rows = process.env.GOOGLE_SHEETS_SYNC === "true"
+      const rows = process.env.GOOGLE_SHEETS_SYNC === "true" && !invoiceTestMode
         ? await readGoogleSheetInventoryRows()
         : readV2InventoryWorkbook(workbookPath).rows;
       const selected = rows.find((row) => row.inventoryId === inventoryId && row.remainingQty > 0);
@@ -1039,7 +1058,20 @@ client.on(Events.InteractionCreate, async (interaction) => {
       }
 
       const draft: SaleDraft = {
-        cardKey: selected.rawCardKey,
+        cardKey: buildSaleCardKey({
+          cardKey: "",
+          inventoryId: selected.inventoryId,
+          cardName: selected.cardName,
+          setSeries: selected.setSeries,
+          cardNumber: selected.cardNumber,
+          rarity: selected.rarity,
+          condition: selected.condition,
+          language: selected.language,
+          variantPrinting: selected.variantPrinting,
+          dateSold: "",
+          qtySold: 1,
+          sellPrice: 0,
+        }),
         inventoryId: selected.inventoryId,
         cardName: selected.cardName,
         setSeries: selected.setSeries,
@@ -1053,13 +1085,21 @@ client.on(Events.InteractionCreate, async (interaction) => {
         sellPrice,
         notes,
       };
-      // The selected inventory lot is the authoritative cost source for this sale.
-      // Selling price belongs to the Sales Log; inventory Unit Cost remains the
-      // acquisition cost and is allocated only from the lot the user selected.
-      const saleIds = process.env.GOOGLE_SHEETS_SYNC === "true" ? await readGoogleSheetSaleIds() : [];
+      // The selected inventory record is the authoritative lot for this sale.
+      // Allocation stays inside that lot; it never spills into another acquisition lot.
+      const saleIds = process.env.GOOGLE_SHEETS_SYNC === "true" && !invoiceTestMode
+        ? await readGoogleSheetSaleIds()
+        : readWorkbookIds(workbookPath!, 4, "SALE");
       const salePlan = buildSelectedLotSalePlan(rows, draft, saleIds);
       const pendingId = salePlan.saleId + "-" + Date.now().toString(36);
-      pendingSales.set(pendingId, { id: pendingId, draft, saleId: salePlan.saleId, allocations: salePlan.allocations, createdAt: Date.now() });
+      pendingSales.set(pendingId, {
+        id: pendingId,
+        draft,
+        saleId: salePlan.saleId,
+        allocations: salePlan.allocations,
+        selectedRemainingQty: selected.remainingQty,
+        createdAt: Date.now(),
+      });
 
       const totalRevenue = qtySold * sellPrice;
       const estimatedCost = salePlan.allocations.reduce((sum, allocation) => sum + allocation.qty * allocation.unitCost, 0);
@@ -1085,17 +1125,23 @@ client.on(Events.InteractionCreate, async (interaction) => {
           "Revenue: **₱" + totalRevenue.toFixed(2) + "**",
           "Inventory cost preview: **₱" + estimatedCost.toFixed(2) + "**",
           "",
-          "Selected inventory allocation:",
+          "Selected inventory lot allocation:",
           allocationSummary,
           notes ? "\nNotes: " + notes : "",
           "",
-          "Confirming will write the Sale Log row and the Cost Allocation for the selected inventory lot.",
+          "Confirming will write the Sale Log row and Cost Allocation for this selected inventory lot only.",
         ].join("\n"),
         components: [confirmRow],
       });
     } catch (error) {
       console.error("Failed to prepare sale:", error);
-      await interaction.editReply({ content: "I couldn't prepare that sale. Check the bot logs." });
+      const message = error instanceof Error ? error.message : String(error);
+      const userMessage = message.includes("unit(s) remain in the selected inventory lot")
+        ? message
+        : "I couldn't prepare that sale. Please try the sale again.";
+      await interaction.editReply({
+        content: "❌ **Sale could not be prepared**\n\n" + userMessage,
+      });
     }
     return;
   }
@@ -1379,39 +1425,86 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
     await interaction.deferUpdate();
     try {
-      if (process.env.GOOGLE_SHEETS_SYNC !== "true") {
-        throw new Error("Google Sheets sales persistence is not enabled. Set GOOGLE_SHEETS_SYNC=true before recording sales.");
-      }
-      const allocationIds = await readGoogleSheetAllocationIds();
-      let maxAllocation = 0;
-      for (const id of allocationIds) {
-        const match = id.match(/^ALLOC-(\\d+)$/i);
-        if (match) maxAllocation = Math.max(maxAllocation, Number(match[1]));
-      }
-      const allocations = pending.allocations.map((allocation, index) => ({
-        allocationId: "ALLOC-" + String(maxAllocation + index + 1).padStart(6, "0"),
-        inventoryId: allocation.inventoryId,
-        qty: allocation.qty,
-      }));
+      let allocations: Array<{ allocationId: string; inventoryId: string; qty: number }> = [];
+      await withSalePersistenceLock(async () => {
+        if (!invoiceTestMode && process.env.GOOGLE_SHEETS_SYNC !== "true") {
+          throw new Error("Google Sheets sales persistence is not enabled. Set GOOGLE_SHEETS_SYNC=true before recording sales.");
+        }
 
-      await writeSaleToGoogleSheets({
-        saleId: pending.saleId,
-        cardKey: pending.draft.cardKey,
-        inventoryId: pending.draft.inventoryId,
-        cardName: pending.draft.cardName,
-        setSeries: pending.draft.setSeries,
-        cardNumber: pending.draft.cardNumber,
-        rarity: pending.draft.rarity,
-        condition: pending.draft.condition,
-        language: pending.draft.language,
-        variantPrinting: pending.draft.variantPrinting,
-        dateSold: pending.draft.dateSold,
-        qtySold: pending.draft.qtySold,
-        sellPrice: pending.draft.sellPrice,
-        notes: pending.draft.notes,
-        allocations,
+        // Sale drafts can be prepared concurrently. Generate the final IDs only
+        // while holding the persistence lock so two confirmations cannot select
+        // the same Sale/Allocation IDs or the same next worksheet row.
+        const [saleIds, allocationIds] = invoiceTestMode
+          ? [readWorkbookIds(workbookPath!, 4, "SALE"), readWorkbookIds(workbookPath!, 5, "ALLOC")]
+          : [await readGoogleSheetSaleIds(), await readGoogleSheetAllocationIds()];
+        let maxSale = 0;
+        for (const id of saleIds) {
+          const match = id.match(/^SALE-(\d+)$/i);
+          if (match) maxSale = Math.max(maxSale, Number(match[1]));
+        }
+        const finalSaleId = saleIds.includes(pending.saleId)
+          ? "SALE-" + String(maxSale + 1).padStart(6, "0")
+          : pending.saleId;
+        let maxAllocation = 0;
+        for (const id of allocationIds) {
+          const match = id.match(/^ALLOC-(\d+)$/i);
+          if (match) maxAllocation = Math.max(maxAllocation, Number(match[1]));
+        }
+        allocations = pending.allocations.map((allocation, index) => ({
+          allocationId: "ALLOC-" + String(maxAllocation + index + 1).padStart(6, "0"),
+          inventoryId: allocation.inventoryId,
+          qty: allocation.qty,
+        }));
+
+        if (invoiceTestMode) {
+          persistSaleToWorkbook(workbookPath!, {
+            saleId: finalSaleId,
+          cardKey: pending.draft.cardKey,
+          inventoryId: pending.draft.inventoryId,
+          cardName: pending.draft.cardName,
+          setSeries: pending.draft.setSeries,
+          cardNumber: pending.draft.cardNumber,
+          rarity: pending.draft.rarity,
+          condition: pending.draft.condition,
+          language: pending.draft.language,
+          variantPrinting: pending.draft.variantPrinting,
+          dateSold: pending.draft.dateSold,
+          qtySold: pending.draft.qtySold,
+          sellPrice: pending.draft.sellPrice,
+            notes: pending.draft.notes,
+            allocations,
+          });
+        } else {
+          await writeSaleToGoogleSheets({
+            saleId: finalSaleId,
+          cardKey: pending.draft.cardKey,
+          inventoryId: pending.draft.inventoryId,
+          cardName: pending.draft.cardName,
+          setSeries: pending.draft.setSeries,
+          cardNumber: pending.draft.cardNumber,
+          rarity: pending.draft.rarity,
+          condition: pending.draft.condition,
+          language: pending.draft.language,
+          variantPrinting: pending.draft.variantPrinting,
+          dateSold: pending.draft.dateSold,
+          qtySold: pending.draft.qtySold,
+          sellPrice: pending.draft.sellPrice,
+            notes: pending.draft.notes,
+            allocations,
+          });
+        }
+        pending.saleId = finalSaleId;
+        pendingSales.delete(pendingId);
       });
-      pendingSales.delete(pendingId);
+
+      const remainingAfterSale = pending.selectedRemainingQty - pending.draft.qtySold;
+      const soldOut = remainingAfterSale === 0;
+
+      // Remove the consumed lot from any still-live Discord selection cache.
+      for (const allocation of allocations) {
+        pendingSaleSelections.delete(allocation.inventoryId);
+      }
+
       await interaction.editReply({
         content: [
           "✅ **Sale recorded**",
@@ -1421,7 +1514,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           "Quantity: **" + pending.draft.qtySold + "**",
           "Sell price: **₱" + pending.draft.sellPrice.toFixed(2) + " each**",
           "Inventory allocation: **" + allocations.length + " lot(s)**",
-          "The Sales Log and Cost Allocation were written together.",
+          "The Sales Log and Cost Allocation were written together." + (soldOut ? "\n📦 This inventory lot is now **sold out**." : ""),
         ].join("\n"),
         components: [],
       });
@@ -1525,10 +1618,12 @@ client.on(Events.InteractionCreate, async (interaction) => {
       return;
     }
 
-    // Acknowledge the button before disk I/O so Discord does not time out the interaction.
-    await interaction.deferUpdate();
-
     try {
+      // Acknowledge the button before disk I/O so Discord does not time out the interaction.
+      // A stale Discord interaction can return 10062 (Unknown interaction). Treat that
+      // as an expired review button instead of allowing the rejection to crash the bot.
+      await interaction.deferUpdate();
+
       // Production workbook backups are currently opt-in. Set
       // INVENTORY_BACKUP_ON_WRITE=true to enable them again.
       if (!invoiceTestMode && process.env.INVENTORY_BACKUP_ON_WRITE === "true") {
@@ -1569,10 +1664,15 @@ client.on(Events.InteractionCreate, async (interaction) => {
       });
     } catch (error) {
       console.error("Failed to store confirmed invoice:", error);
-      await interaction.editReply({
-        content: "The verified inventory rows were approved, but local storage failed. The review remains pending. Use **/review** to retry; no review buttons are kept on this message.",
-        components: [],
-      });
+      if (error && typeof error === "object" && "code" in error && (error as { code?: number }).code === 10062) {
+        return;
+      }
+      if (interaction.deferred || interaction.replied) {
+        await interaction.editReply({
+          content: "The verified inventory rows were approved, but local storage failed. The review remains pending. Use **/review** to retry; no review buttons are kept on this message.",
+          components: [],
+        });
+      }
     }
   }
 });
