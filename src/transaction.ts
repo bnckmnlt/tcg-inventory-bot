@@ -85,9 +85,9 @@ function loadPendingTransactions(): void {
     }
     for (const transaction of transactions) {
       if (!transaction?.id) continue;
-      transaction.status ??= transaction.plan.rows.some((row) => row.input.reviewRequired)
-        ? "PENDING_REVIEW"
-        : "READY";
+      // Legacy transaction records did not persist a lifecycle status. Do not
+      // resurrect historical records into /review after an upgrade.
+      transaction.status ??= "STORED";
       transaction.pages ??= [{
         id: transaction.sourceMessageId,
         sourceMessageId: transaction.sourceMessageId,
@@ -196,7 +196,12 @@ export function getPendingTransactionByPurchaseIdentity(
 }
 
 export function listPendingTransactions(): PendingTransaction[] {
-  return [...pendingTransactions.values()].filter((transaction) => transaction.status !== "STORED" && transaction.status !== "REJECTED");
+  return [...pendingTransactions.values()].filter((transaction) =>
+    transaction.status === "ACTIVE" ||
+    transaction.status === "PENDING_REVIEW" ||
+    transaction.status === "READY" ||
+    transaction.status === "NEEDS_INVOICE_SELECTION",
+  );
 }
 
 export function listContinuationTargets(): PendingTransaction[] {
