@@ -168,10 +168,10 @@ function quotedSheetRange(sheetName: string, a1: string): string {
 
 async function ensureHeaderRow(token: string, spreadsheetId: string, sheetName: string): Promise<void> {
   const url =
-    `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(spreadsheetId)}/values/${range(sheetName, "A1:Y1")}?valueInputOption=USER_ENTERED`;
+    `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(spreadsheetId)}/values/${range(sheetName, "A3:Y3")}?valueInputOption=USER_ENTERED`;
   await sheetsRequest(token, url, {
     method: "PUT",
-    body: JSON.stringify({ range: quotedSheetRange(sheetName, "A1:Y1"), majorDimension: "ROWS", values: [V2_INVENTORY_HEADERS] }),
+    body: JSON.stringify({ range: quotedSheetRange(sheetName, "A3:Y3"), majorDimension: "ROWS", values: [V2_INVENTORY_HEADERS] }),
   });
 }
 
@@ -203,7 +203,7 @@ async function appendRows(
   if (rows.length === 0) return 0;
 
   const url =
-    `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(spreadsheetId)}/values/${range(sheetName, "A:Y")}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`;
+    `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(spreadsheetId)}/values/${range(sheetName, "A:Y")}:append?valueInputOption=USER_ENTERED&insertDataOption=OVERWRITE`;
   await sheetsRequest(token, url, {
     method: "POST",
     body: JSON.stringify({
@@ -255,7 +255,7 @@ export async function appendInventoryRowsToGoogleSheets(
 function inventoryRowToParsed(row: V2InventoryRow): ParsedV2InventoryRow {
   const raw: Record<string, unknown> = {
     "Inventory ID": row.inventoryId,
-    "Card Key": "",
+    "Card Key": buildInventoryCardKey(row),
     "Card Name": row.cardName,
     "Set / Series": row.setSeries,
     "Card Number": row.cardNumber,
@@ -452,7 +452,7 @@ export async function writeSaleToGoogleSheets(input: GoogleSaleWriteInput): Prom
   const appendValues = async (sheetName: string, values: unknown[][], columns: string): Promise<number> => {
     const url = "https://sheets.googleapis.com/v4/spreadsheets/" + encodeURIComponent(config.spreadsheetId)
       + "/values/" + encodeURIComponent("'" + sheetName.replace(/'/g, "''") + "'!A:" + columns)
-      + ":append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS&includeValuesInResponse=true";
+      + ":append?valueInputOption=USER_ENTERED&insertDataOption=OVERWRITE&includeValuesInResponse=true";
     const result = await sheetsRequest<{ updates?: { updatedRange?: string } }>(token, url, {
       method: "POST",
       body: JSON.stringify({ majorDimension: "ROWS", values }),
