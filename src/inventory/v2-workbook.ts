@@ -47,6 +47,13 @@ export interface V2WorkbookParseResult {
   issues: V2WorkbookParseIssue[];
 }
 
+export function buildInventoryCardKey(row: Pick<ParsedV2InventoryRow, "cardName" | "setSeries" | "cardNumber" | "rarity" | "condition" | "language" | "variantPrinting">): string {
+  return [row.cardName, row.setSeries, row.cardNumber, row.rarity || "", row.condition, row.language, row.variantPrinting || "Normal"]
+    .map((value) => String(value || "").trim())
+    .join("|")
+    .toUpperCase();
+}
+
 function text(value: unknown): string {
   return value == null ? "" : String(value).trim();
 }
