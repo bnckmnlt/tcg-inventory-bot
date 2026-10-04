@@ -109,7 +109,13 @@ export function parseV2InventorySheet(sheetRows: unknown[][]): V2WorkbookParseRe
     const variantPrinting = text(valueAt(raw, indexes, "Variant / Printing")) || "Normal";
     const qtyPurchased = number(valueAt(raw, indexes, "Qty Purchased"));
     const unitCost = number(valueAt(raw, indexes, "Unit Cost (₱ each)"));
-    const remainingQty = number(valueAt(raw, indexes, "Remaining Qty"));
+    const qtySold = number(valueAt(raw, indexes, "Qty Sold")) ?? 0;
+    const remainingValue = valueAt(raw, indexes, "Remaining Qty");
+    // Google Sheets can return an empty formatted value for a formula cell while
+    // the source quantities are still present. Derive Remaining Qty in that case.
+    const remainingQty = number(remainingValue) ?? (
+      qtyPurchased != null && qtySold != null ? Math.max(0, qtyPurchased - qtySold) : undefined
+    );
 
     const required: Array<[string, string, unknown]> = [
       ["Card Name", "cardName", cardName],

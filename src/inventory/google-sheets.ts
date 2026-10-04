@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { createSign } from "node:crypto";
 import { readV2InventoryWorkbook } from "./read-xlsx.js";
-import { V2_INVENTORY_HEADERS, type ParsedV2InventoryRow } from "./v2-workbook.js";
+import { parseV2InventorySheet, V2_INVENTORY_HEADERS, type ParsedV2InventoryRow } from "./v2-workbook.js";
 import type { V2InventoryRow } from "./types.js";
 
 const SHEETS_SCOPE = "https://www.googleapis.com/auth/spreadsheets";
@@ -304,8 +304,214 @@ export async function appendParsedInventoryRowsToGoogleSheets(
   return { inserted, skipped: rows.length - inserted };
 }
 
+interface SheetValueRange {
+  values?: unknown[][];
+}
+
+async function readBatchValues(
+  token: string,
+  spreadsheetId: string,
+  ranges: string[],
+): Promise<SheetValueRange[]> {
+  const query = ranges.map((item) => "ranges=" + encodeURIComponent(item)).join("&");
+  const url = "https://sheets.googleapis.com/v4/spreadsheets/" + encodeURIComponent(spreadsheetId) + "/values:batchGet?" + query + "&valueRenderOption=FORMATTED_VALUE";
+  const body = await sheetsRequest<{ valueRanges?: SheetValueRange[] }>(token, url);
+  return body.valueRanges ?? [];
+}
+
+export async function readGoogleSheetInventoryRows(): Promise<ParsedV2InventoryRow[]> {
+  const config = loadConfig();
+  const token = await getAccessToken(config.credentials);
+  const sheetName = await verifySheetName(token, config.spreadsheetId, config.sheetName);
+  const ranges = [quotedSheetRange(sheetName, "A3:Y5000")];
+  const [inventory] = await readBatchValues(token, config.spreadsheetId, ranges);
+  // The parser reports physical worksheet row numbers. The API range starts
+  // at row 3, so preserve rows 1-2 before parsing.
+  const parsed = parseV2InventorySheet([[], [], ...(inventory?.values ?? [])]);
+  if (parsed.issues.length > 0) throw new Error("Google Sheets Inventory has parser issues: " + parsed.issues.map((issue) => issue.message).join(" | "));
+  return parsed.rows;
+}
+
 export async function appendInventoryRowsDirectToGoogleSheets(
   rows: V2InventoryRow[],
 ): Promise<{ inserted: number; skipped: number }> {
   return appendParsedInventoryRowsToGoogleSheets(rows.map(inventoryRowToParsed));
+}
+
+export interface GoogleSaleWriteInput {
+  saleId: string;
+  cardKey: string;
+  inventoryId: string;
+  cardName: string;
+  setSeries: string;
+  cardNumber: string;
+  rarity?: string;
+  condition: string;
+  language: string;
+  variantPrinting: string;
+  dateSold: string;
+  qtySold: number;
+  sellPrice: number;
+  notes?: string;
+  allocations: Array<{ allocationId: string; inventoryId: string; qty: number }>;
+}
+
+export async function readGoogleSheetSaleIds(): Promise<string[]> {
+  const config = loadConfig();
+  const token = await getAccessToken(config.credentials);
+  const [sales] = await readBatchValues(token, config.spreadsheetId, [quotedSheetRange("Sales Log", "A4:A5000")]);
+  return (sales?.values ?? []).map((row) => String(row[0] ?? "").trim()).filter(Boolean);
+}
+
+export async function readGoogleSheetAllocationIds(): Promise<string[]> {
+  const config = loadConfig();
+  const token = await getAccessToken(config.credentials);
+  const [allocations] = await readBatchValues(token, config.spreadsheetId, [quotedSheetRange("Cost Allocations", "A4:A5000")]);
+  return (allocations?.values ?? []).map((row) => String(row[0] ?? "").trim()).filter(Boolean);
+}
+
+export async function writeSaleToGoogleSheets(input: GoogleSaleWriteInput): Promise<void> {
+  const config = loadConfig();
+  const token = await getAccessToken(config.credentials);
+  const inventorySheet = await verifySheetName(token, config.spreadsheetId, config.sheetName);
+  const metadataUrl = "https://sheets.googleapis.com/v4/spreadsheets/" + encodeURIComponent(config.spreadsheetId) + "?fields=sheets.properties";
+  const metadata = await sheetsRequest<{ sheets?: Array<{ properties?: { sheetId?: number; title?: string } }> }>(token, metadataUrl);
+  const sheetIds = new Map((metadata.sheets || [])
+    .filter((sheet) => sheet.properties?.title && sheet.properties?.sheetId !== undefined)
+    .map((sheet) => [sheet.properties!.title!, sheet.properties!.sheetId!] as const));
+  const titles = new Set(sheetIds.keys());
+  if (!titles.has("Sales Log") || !titles.has("Cost Allocations")) throw new Error("Google Sheets must contain Sales Log and Cost Allocations tabs.");
+
+  const ranges = [quotedSheetRange(inventorySheet, "A3:Y5000"), quotedSheetRange("Sales Log", "A3:R5000"), quotedSheetRange("Cost Allocations", "A3:L5000")];
+  const query = ranges.map((item) => "ranges=" + encodeURIComponent(item)).join("&");
+  const readUrl = "https://sheets.googleapis.com/v4/spreadsheets/" + encodeURIComponent(config.spreadsheetId) + "/values:batchGet?" + query + "&valueRenderOption=FORMATTED_VALUE";
+  const readBody = await sheetsRequest<{ valueRanges?: Array<{ values?: unknown[][] }> }>(token, readUrl);
+  const inventoryValues = readBody.valueRanges?.[0]?.values || [];
+  const salesValues = readBody.valueRanges?.[1]?.values || [];
+  const allocationValues = readBody.valueRanges?.[2]?.values || [];
+  // parseV2InventorySheet reports physical worksheet row numbers. The batchGet
+  // range starts at row 3, so preserve those two leading rows when parsing;
+  // otherwise sourceRow would be one row behind and inventory formulas would be
+  // written to row 3/2 instead of the actual inventory lot row.
+  const parsedInventory = parseV2InventorySheet([[], [], ...inventoryValues]);
+  if (parsedInventory.issues.length > 0) throw new Error("Google Sheets Inventory has parser issues: " + parsedInventory.issues.map((issue) => issue.message).join(" | "));
+
+  const selected = parsedInventory.rows.find((row) => row.inventoryId === input.inventoryId && row.rawCardKey === input.cardKey && row.remainingQty > 0);
+  if (!selected) throw new Error("The selected inventory lot changed or is no longer available. Search again.");
+  if (input.qtySold > selected.remainingQty) {
+    throw new Error("Only " + selected.remainingQty + " unit(s) remain in the selected inventory lot.");
+  }
+
+  const currentAllocations: Array<{ inventoryId: string; qty: number }> = [
+    { inventoryId: selected.inventoryId, qty: input.qtySold },
+  ];
+  if (currentAllocations.length !== input.allocations.length || currentAllocations.some((allocation, index) => allocation.inventoryId !== input.allocations[index].inventoryId || allocation.qty !== input.allocations[index].qty)) {
+    throw new Error("The selected inventory lot changed while this sale was waiting for confirmation. Search again and prepare the sale again.");
+  }
+
+  const saleIds = salesValues.slice(1).map((row) => String(row[0] || "").trim()).filter(Boolean);
+  if (saleIds.includes(input.saleId)) throw new Error("Sale ID " + input.saleId + " already exists. The sale was not written.");
+  const allocationIds = allocationValues.slice(1).map((row) => String(row[0] || "").trim()).filter(Boolean);
+  // The Sheets API may omit trailing completely-empty rows from a range response.
+  // Treat the first omitted row as the next append position instead of calling the
+  // sheet full. Row 3 is the header; writable rows are 4..5000.
+  const findNextRow = (values: unknown[][], startRow: number, maxRow: number): number => {
+    for (let index = 0; index < values.length; index += 1) {
+      if (!String(values[index]?.[0] || "").trim()) return startRow + index;
+    }
+    const nextRow = startRow + values.length;
+    return nextRow <= maxRow ? nextRow : maxRow + 1;
+  };
+  const salesRow = findNextRow(salesValues, 3, 5000);
+  const allocationStart = findNextRow(allocationValues, 3, 5000);
+  if (salesRow > 5000 || allocationStart + input.allocations.length - 1 > 5000) throw new Error("Sales Log or Cost Allocations is at capacity.");
+
+  // Keep Sales Log Card Key identical to the authoritative Inventory Card Key.
+  // Store the selected lot's key as a value so the new row is immediately
+  // usable even before a spreadsheet recalculation pass.
+  const authoritativeCardKey = selected.rawCardKey.trim();
+  if (!authoritativeCardKey) throw new Error("Selected inventory lot has no Card Key. Repair the Inventory row before recording a sale.");
+  const revenueFormula = "=IF(A" + salesRow + "=\"\",\"\",L" + salesRow + "*M" + salesRow + ")";
+  const costFormula = "=IF(A" + salesRow + "=\"\",\"\",SUMIFS('Cost Allocations'!$G$4:$G$5000,'Cost Allocations'!$B$4:$B$5000,A" + salesRow + "))";
+  const profitFormula = "=IF(A" + salesRow + "=\"\",\"\",N" + salesRow + "-O" + salesRow + ")";
+  const checkFormula = "=IF(A" + salesRow + "=\"\",\"\",IF(SUMIFS('Cost Allocations'!$E$4:$E$5000,'Cost Allocations'!$B$4:$B$5000,A" + salesRow + ")=L" + salesRow + ",\"OK\",IF(SUMIFS('Cost Allocations'!$E$4:$E$5000,'Cost Allocations'!$B$4:$B$5000,A" + salesRow + ")=0,\"NOT ALLOCATED\",IF(SUMIFS('Cost Allocations'!$E$4:$E$5000,'Cost Allocations'!$B$4:$B$5000,A" + salesRow + ")<L" + salesRow + ",\"PARTIAL\",\"OVER-ALLOCATED\"))))";
+
+  const data: Array<{ range: string; majorDimension: string; values: unknown[][] }> = [
+    { range: quotedSheetRange("Sales Log", "A" + salesRow + ":M" + salesRow), majorDimension: "ROWS", values: [[input.saleId, authoritativeCardKey, input.inventoryId, input.cardName, input.setSeries, input.cardNumber, input.rarity || "", input.condition, input.language, input.variantPrinting || "Normal", input.dateSold, input.qtySold, input.sellPrice]] },
+    { range: quotedSheetRange("Sales Log", "N" + salesRow + ":P" + salesRow), majorDimension: "ROWS", values: [[revenueFormula, costFormula, profitFormula]] },
+    { range: quotedSheetRange("Sales Log", "Q" + salesRow), majorDimension: "ROWS", values: [[input.notes || ""]] },
+    { range: quotedSheetRange("Sales Log", "R" + salesRow), majorDimension: "ROWS", values: [[checkFormula]] },
+  ];
+  const inventoryFormulaData: Array<{ range: string; majorDimension: string; values: unknown[][] }> = [];
+
+  for (let index = 0; index < input.allocations.length; index += 1) {
+    const allocation = input.allocations[index];
+    const row = allocationStart + index;
+    const inventoryLot = parsedInventory.rows.find((candidate) => candidate.inventoryId === allocation.inventoryId);
+    if (!inventoryLot) throw new Error("Selected inventory lot " + allocation.inventoryId + " no longer exists. Search again.");
+    const unitCost = inventoryLot.unitCost;
+    const allocatedCost = allocation.qty * unitCost;
+    const allocatedRevenue = allocation.qty * input.sellPrice;
+    data.push({ range: quotedSheetRange("Cost Allocations", "A" + row + ":J" + row), majorDimension: "ROWS", values: [[allocation.allocationId, input.saleId, allocation.inventoryId, inventoryLot.rawCardKey, allocation.qty, unitCost, allocatedCost, allocatedRevenue, allocatedRevenue - allocatedCost, "Selected Lot"]] });
+    data.push({ range: quotedSheetRange("Cost Allocations", "L" + row), majorDimension: "ROWS", values: [["=IF(A" + row + "=\"\",\"\",IF(D" + row + "=\"ID NOT FOUND\",\"BAD INV ID\",IF(ISNA(MATCH(B" + row + ",'Sales Log'!$A$4:$A$5000,0)),\"BAD SALE ID\",IF(INDEX('Sales Log'!$B$4:$B$5000,MATCH(B" + row + ",'Sales Log'!$A$4:$A$5000,0))=D" + row + ",\"OK\",\"KEY MISMATCH\"))))"]] });
+    // Reassert the Inventory quantity formulas on the selected lot. This keeps
+    // the workbook formula-driven while ensuring Google Sheets has formulas present
+    // even on rows whose formulas were previously missing or stale.
+    inventoryFormulaData.push({
+      range: quotedSheetRange(inventorySheet, "Q" + inventoryLot.sourceRow + ":W" + inventoryLot.sourceRow),
+      majorDimension: "ROWS",
+      values: [[
+        "=IF(A" + inventoryLot.sourceRow + "=\"\",\"\",IF(R" + inventoryLot.sourceRow + "=0,\"\",T" + inventoryLot.sourceRow + "/R" + inventoryLot.sourceRow + "))",
+        "=IF(A" + inventoryLot.sourceRow + "=\"\",\"\",SUMIFS('Cost Allocations'!$E$4:$E$5000,'Cost Allocations'!$C$4:$C$5000,A" + inventoryLot.sourceRow + "))",
+        "=IF(A" + inventoryLot.sourceRow + "=\"\",\"\",M" + inventoryLot.sourceRow + "-R" + inventoryLot.sourceRow + ")",
+        "=IF(A" + inventoryLot.sourceRow + "=\"\",\"\",SUMIFS('Cost Allocations'!$H$4:$H$5000,'Cost Allocations'!$C$4:$C$5000,A" + inventoryLot.sourceRow + "))",
+        "=IF(A" + inventoryLot.sourceRow + "=\"\",\"\",SUMIFS('Cost Allocations'!$G$4:$G$5000,'Cost Allocations'!$C$4:$C$5000,A" + inventoryLot.sourceRow + "))",
+        "=IF(A" + inventoryLot.sourceRow + "=\"\",\"\",T" + inventoryLot.sourceRow + "-U" + inventoryLot.sourceRow + ")",
+        "=IF(A" + inventoryLot.sourceRow + "=\"\",\"\",IF(X" + inventoryLot.sourceRow + "<>\"\",X" + inventoryLot.sourceRow + ",IF(S" + inventoryLot.sourceRow + "<0,\"Over-Allocated\",IF(S" + inventoryLot.sourceRow + "=0,\"Sold Out\",IF(R" + inventoryLot.sourceRow + "=0,\"In Stock\",\"Partially Sold\")))))",
+      ]],
+    });
+  }
+
+  if (process.env.GOOGLE_SHEETS_BACKUP_ON_WRITE === "true") {
+    await backupGoogleSheetTab(token, config.spreadsheetId, "Sales Log");
+    await backupGoogleSheetTab(token, config.spreadsheetId, "Cost Allocations");
+  }
+  const writeUrl = "https://sheets.googleapis.com/v4/spreadsheets/" + encodeURIComponent(config.spreadsheetId) + "/values:batchUpdate";
+  // Cost Allocations must exist before Inventory R:S recalculates from it.
+  await sheetsRequest(token, writeUrl, {
+    method: "POST",
+    body: JSON.stringify({ valueInputOption: "USER_ENTERED", data }),
+  });
+
+  if (inventoryFormulaData.length > 0) {
+    await sheetsRequest(token, writeUrl, {
+      method: "POST",
+      body: JSON.stringify({ valueInputOption: "USER_ENTERED", data: inventoryFormulaData }),
+    });
+  }
+
+  // New rows written through the Values API do not inherit the visual formatting
+  // of the existing table. Copy only the formatting from the first data row so
+  // dates, currency, borders, alignment, and status/check columns stay consistent.
+  const salesSheetId = sheetIds.get("Sales Log");
+  const allocationSheetId = sheetIds.get("Cost Allocations");
+  if (salesSheetId === undefined || allocationSheetId === undefined) throw new Error("Sales Log or Cost Allocations sheet ID is missing.");
+  const formatRequests: unknown[] = [
+    {
+      copyPaste: {
+        source: { sheetId: salesSheetId, startRowIndex: 3, endRowIndex: 4, startColumnIndex: 0, endColumnIndex: 18 },
+        destination: { sheetId: salesSheetId, startRowIndex: salesRow - 1, endRowIndex: salesRow, startColumnIndex: 0, endColumnIndex: 18 },
+        pasteType: "PASTE_FORMAT",
+      },
+    },
+    ...input.allocations.map((_, index) => ({
+      copyPaste: {
+        source: { sheetId: allocationSheetId, startRowIndex: 3, endRowIndex: 4, startColumnIndex: 0, endColumnIndex: 12 },
+        destination: { sheetId: allocationSheetId, startRowIndex: allocationStart + index - 1, endRowIndex: allocationStart + index, startColumnIndex: 0, endColumnIndex: 12 },
+        pasteType: "PASTE_FORMAT",
+      },
+    })),
+  ];
+  const formatUrl = "https://sheets.googleapis.com/v4/spreadsheets/" + encodeURIComponent(config.spreadsheetId) + ":batchUpdate";
+  await sheetsRequest(token, formatUrl, { method: "POST", body: JSON.stringify({ requests: formatRequests }) });
 }

@@ -53,6 +53,27 @@ test("reports missing identity and accounting fields without discarding the row"
   assert.ok(result.issues.some((issue) => issue.field === "condition"));
 });
 
+test("derives Remaining Qty when Google Sheets returns a blank formula result", () => {
+  const result = parseV2InventorySheet([
+    [...V2_INVENTORY_HEADERS],
+    row({
+      "Inventory ID": "INV-000005",
+      "Card Name": "Pikachu",
+      "Set / Series": "151",
+      "Card Number": "025",
+      "Condition": "Near Mint",
+      "Language": "English",
+      "Qty Purchased": 3,
+      "Qty Sold": 1,
+      "Unit Cost (₱ each)": 20,
+      "Remaining Qty": "",
+    }),
+  ]);
+
+  assert.equal(result.issues.length, 0);
+  assert.equal(result.rows[0].remainingQty, 2);
+});
+
 test("defaults a blank V2 variant to Normal", () => {
   const result = parseV2InventorySheet([
     [...V2_INVENTORY_HEADERS],

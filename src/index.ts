@@ -9,6 +9,7 @@ import {
   GatewayIntentBits,
   Message,
   MessageFlags,
+  TextChannel,
   ModalBuilder,
   StringSelectMenuBuilder,
   StringSelectMenuOptionBuilder,
@@ -29,7 +30,7 @@ import type { Catalog } from "./catalog/types.js";
 import { planInvoiceIngestion, purchaseIdentityKeys, type IngestionPlan } from "./inventory/ingest.js";
 import { createJsonInventoryStore } from "./inventory/json-store.js";
 import { invoicePlanToWorkbookRows, persistInvoicePlanToWorkbookSafely } from "./inventory/workbook-persistence.js";
-import { appendInventoryRowsDirectToGoogleSheets } from "./inventory/google-sheets.js";
+import { appendInventoryRowsDirectToGoogleSheets, readGoogleSheetAllocationIds, readGoogleSheetInventoryRows, readGoogleSheetSaleIds, writeSaleToGoogleSheets } from "./inventory/google-sheets.js";
 import {
   createPendingTransaction,
   getPendingTransaction,
@@ -52,9 +53,11 @@ import {
   setTransactionStatus,
   type InvoicePage,
 } from "./transaction.js";
+import { buildSelectedLotSalePlan, type SaleDraft } from "./inventory/sales.js";
 
 const token = process.env.DISCORD_TOKEN;
 const invoiceChannelId = process.env.INVOICE_CHANNEL_ID;
+const purchaseReviewChannelId = process.env.PURCHASE_REVIEW_CHANNEL_ID;
 
 if (!token) throw new Error("DISCORD_TOKEN is missing from .env");
 if (!invoiceChannelId) throw new Error("INVOICE_CHANNEL_ID is missing from .env");
@@ -350,6 +353,15 @@ function buildPendingReviewMenu() {
   return new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(menu);
 }
 
+async function getPurchaseReviewChannel() {
+  if (!purchaseReviewChannelId) return null;
+  const channel = await client.channels.fetch(purchaseReviewChannelId);
+  if (!channel || !channel.isSendable() || channel.isDMBased()) {
+    throw new Error(`PURCHASE_REVIEW_CHANNEL_ID ${purchaseReviewChannelId} is not a usable Discord text channel.`);
+  }
+  return channel as TextChannel;
+}
+
 function buildContinuationMenu(continuationId: string) {
   const transactions = listContinuationTargets().slice(0, 25);
   const menu = new StringSelectMenuBuilder()
@@ -400,6 +412,62 @@ function buildCardNumberModal(
     .setCustomId(`invoice:card-number:${transactionId}:${rowIndex}`)
     .setTitle(`${cardName} — ${setName} — ${rarity}/${variant}`.slice(0, 45))
     .addComponents(new ActionRowBuilder<TextInputBuilder>().addComponents(input));
+}
+
+interface PendingSale {
+  id: string;
+  draft: SaleDraft;
+  saleId: string;
+  allocations: Array<{ inventoryId: string; qty: number; unitCost: number }>;
+  createdAt: number;
+}
+
+const pendingSales = new Map<string, PendingSale>();
+// Search results are cached briefly so selecting a result can open the Discord
+// modal immediately. Discord gives component interactions only a short response
+// window, while Google Sheets reads can exceed it.
+const pendingSaleSelections = new Map<string, { row: ReturnType<typeof readV2InventoryWorkbook>["rows"][number]; expiresAt: number }>();
+const SALE_SELECTION_TTL_MS = 10 * 60 * 1000;
+
+function buildSaleEntryModal(row: ReturnType<typeof readV2InventoryWorkbook>["rows"][number]) {
+  const quantity = new TextInputBuilder()
+    .setCustomId("sale-quantity")
+    .setLabel("Quantity sold")
+    .setStyle(TextInputStyle.Short)
+    .setPlaceholder("Example: 1")
+    .setRequired(true)
+    .setMaxLength(6);
+  const price = new TextInputBuilder()
+    .setCustomId("sale-price")
+    .setLabel("Sell price per card (PHP)")
+    .setStyle(TextInputStyle.Short)
+    .setPlaceholder("Example: 150")
+    .setRequired(true)
+    .setMaxLength(12);
+  const date = new TextInputBuilder()
+    .setCustomId("sale-date")
+    .setLabel("Date sold (YYYY-MM-DD)")
+    .setStyle(TextInputStyle.Short)
+    .setPlaceholder(new Date().toISOString().slice(0, 10))
+    .setRequired(true)
+    .setMaxLength(10)
+    .setValue(new Date().toISOString().slice(0, 10));
+  const notes = new TextInputBuilder()
+    .setCustomId("sale-notes")
+    .setLabel("Notes (optional)")
+    .setStyle(TextInputStyle.Paragraph)
+    .setRequired(false)
+    .setMaxLength(500);
+
+  return new ModalBuilder()
+    .setCustomId("sale:entry:" + row.inventoryId)
+    .setTitle("Record Sale — " + row.cardName.slice(0, 30))
+    .addComponents(
+      new ActionRowBuilder<TextInputBuilder>().addComponents(quantity),
+      new ActionRowBuilder<TextInputBuilder>().addComponents(price),
+      new ActionRowBuilder<TextInputBuilder>().addComponents(date),
+      new ActionRowBuilder<TextInputBuilder>().addComponents(notes),
+    );
 }
 
 function buildSaleSearchModal() {
@@ -806,7 +874,12 @@ client.on(Events.MessageCreate, async (message: Message) => {
           plan: resolved.plan,
         });
 
-        await message.reply({
+        const reviewChannel = await getPurchaseReviewChannel();
+        const reviewDestination = reviewChannel ?? (message.channel as TextChannel);
+        if (reviewChannel) {
+          await message.reply(`📄 Continuation page received. The purchase-review selector was posted in <#${purchaseReviewChannelId}>.`);
+        }
+        await reviewDestination.send({
           content: continuationCandidates.length > 0
             ? [
                 "📄 **Continuation page detected**",
@@ -842,11 +915,20 @@ client.on(Events.MessageCreate, async (message: Message) => {
       );
 
       const reviewEmbeds = buildReviewEmbeds(invoice, resolved.plan, transaction.id);
-
       const reviewEmbedChunks = chunkReviewEmbeds(reviewEmbeds);
+      const reviewChannel = await getPurchaseReviewChannel();
+      const reviewDestination = reviewChannel ?? (message.channel as TextChannel);
+
+      if (reviewChannel) {
+        await message.reply(`📥 Invoice received. The purchase review for **${invoice.orderId || transaction.id.slice(0, 8)}** was posted in <#${purchaseReviewChannelId}>.`);
+      }
+
       for (let index = 0; index < reviewEmbedChunks.length; index += 1) {
         const isLastChunk = index === reviewEmbedChunks.length - 1;
-        await message.reply({
+        await reviewDestination.send({
+          content: index === 0
+            ? `🧾 **Purchase Review** — invoice ${invoice.orderId || transaction.id.slice(0, 8)}`
+            : undefined,
           embeds: reviewEmbedChunks[index],
           components: isLastChunk
             ? [reviewButtons(transaction.id, resolved.plan.insertable > 0 && !resolved.plan.rows.some((row) => row.input.reviewRequired), resolved.plan.rows.some((row) => row.input.reviewRequired))]
@@ -880,32 +962,140 @@ client.on(Events.InteractionCreate, async (interaction) => {
     }
 
     const query = interaction.fields.getTextInputValue("sale-search").trim();
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
     try {
-      const parsed = readV2InventoryWorkbook(workbookPath);
-      const { available, row } = buildSaleInventoryMenu(parsed.rows, query);
+      const rows = process.env.GOOGLE_SHEETS_SYNC === "true"
+        ? await readGoogleSheetInventoryRows()
+        : readV2InventoryWorkbook(workbookPath).rows;
+      const { available, row } = buildSaleInventoryMenu(rows, query);
 
       if (available.length === 0) {
-        await interaction.reply({
+        await interaction.editReply({
           content: query
             ? `No available inventory records matched **${query}**. Search by card name, set, card number, rarity, condition, variant, or Inventory ID.`
             : "There is no available inventory to sell.",
-          flags: MessageFlags.Ephemeral,
         });
         return;
       }
 
-      await interaction.reply({
+      const now = Date.now();
+      for (const [key, value] of pendingSaleSelections) {
+        if (value.expiresAt <= now) pendingSaleSelections.delete(key);
+      }
+      for (const selectedRow of available) {
+        pendingSaleSelections.set(selectedRow.inventoryId, { row: selectedRow, expiresAt: now + SALE_SELECTION_TTL_MS });
+      }
+
+      await interaction.editReply({
         content: [
           query ? `Search results for **${query}**:` : "Available inventory:",
           available.length === 25 ? "Showing the first 25 matches." : `Found **${available.length}** matching record(s).`,
           "Select the exact inventory record below to continue the sale.",
         ].join("\n"),
         components: [row],
-        flags: MessageFlags.Ephemeral,
       });
     } catch (error) {
       console.error("Failed to search inventory for sale:", error);
-      await interaction.reply({ content: "I couldn't read the Inventory sheet right now. Check the bot logs.", flags: MessageFlags.Ephemeral });
+      await interaction.editReply({ content: "I couldn't read the Inventory sheet right now. Check the bot logs." });
+    }
+    return;
+  }
+
+  if (interaction.isModalSubmit() && interaction.customId.startsWith("sale:entry:")) {
+    if (!workbookPath) {
+      await interaction.reply({ content: "Sales are not configured because INVENTORY_WORKBOOK_PATH is missing.", flags: MessageFlags.Ephemeral });
+      return;
+    }
+
+    const inventoryId = interaction.customId.slice("sale:entry:".length);
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    try {
+      const rows = process.env.GOOGLE_SHEETS_SYNC === "true"
+        ? await readGoogleSheetInventoryRows()
+        : readV2InventoryWorkbook(workbookPath).rows;
+      const selected = rows.find((row) => row.inventoryId === inventoryId && row.remainingQty > 0);
+      if (!selected) {
+        await interaction.editReply({ content: "That inventory record is no longer available. Run **/sale** again." });
+        return;
+      }
+
+      const quantityText = interaction.fields.getTextInputValue("sale-quantity").trim();
+      const priceText = interaction.fields.getTextInputValue("sale-price").trim().replace(/[,₱$]/g, "");
+      const dateSold = interaction.fields.getTextInputValue("sale-date").trim();
+      const notes = interaction.fields.getTextInputValue("sale-notes").trim();
+      const qtySold = Number(quantityText);
+      const sellPrice = Number(priceText);
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(dateSold) || Number.isNaN(Date.parse(dateSold))) {
+        await interaction.editReply({ content: "Date sold must use **YYYY-MM-DD**." });
+        return;
+      }
+      if (!Number.isInteger(qtySold) || qtySold < 1) {
+        await interaction.editReply({ content: "Quantity sold must be a positive whole number." });
+        return;
+      }
+      if (!Number.isFinite(sellPrice) || sellPrice < 0) {
+        await interaction.editReply({ content: "Sell price must be a non-negative PHP amount." });
+        return;
+      }
+
+      const draft: SaleDraft = {
+        cardKey: selected.rawCardKey,
+        inventoryId: selected.inventoryId,
+        cardName: selected.cardName,
+        setSeries: selected.setSeries,
+        cardNumber: selected.cardNumber,
+        rarity: selected.rarity,
+        condition: selected.condition,
+        language: selected.language,
+        variantPrinting: selected.variantPrinting,
+        dateSold,
+        qtySold,
+        sellPrice,
+        notes,
+      };
+      // The selected inventory lot is the authoritative cost source for this sale.
+      // Selling price belongs to the Sales Log; inventory Unit Cost remains the
+      // acquisition cost and is allocated only from the lot the user selected.
+      const saleIds = process.env.GOOGLE_SHEETS_SYNC === "true" ? await readGoogleSheetSaleIds() : [];
+      const salePlan = buildSelectedLotSalePlan(rows, draft, saleIds);
+      const pendingId = salePlan.saleId + "-" + Date.now().toString(36);
+      pendingSales.set(pendingId, { id: pendingId, draft, saleId: salePlan.saleId, allocations: salePlan.allocations, createdAt: Date.now() });
+
+      const totalRevenue = qtySold * sellPrice;
+      const estimatedCost = salePlan.allocations.reduce((sum, allocation) => sum + allocation.qty * allocation.unitCost, 0);
+      const allocationSummary = salePlan.allocations.map((allocation) =>
+        allocation.inventoryId + " × " + allocation.qty + " @ ₱" + allocation.unitCost.toFixed(2)
+      ).join("\n");
+      const confirmRow = new ActionRowBuilder<ButtonBuilder>().addComponents(
+        new ButtonBuilder().setCustomId("sale:confirm:" + pendingId).setLabel("Confirm Sale").setStyle(ButtonStyle.Success),
+        new ButtonBuilder().setCustomId("sale:cancel:" + pendingId).setLabel("Cancel").setStyle(ButtonStyle.Secondary),
+      );
+      await interaction.editReply({
+        content: [
+          "🧾 **Sale Review**",
+          "",
+          "**" + selected.cardName + " — " + selected.cardNumber + "**",
+          selected.setSeries + " • " + (selected.rarity || "Rarity not set") + " • " + (selected.variantPrinting || "Normal"),
+          selected.condition + " • " + selected.language,
+          "Inventory: **" + selected.inventoryId + "**",
+          "",
+          "Date sold: **" + dateSold + "**",
+          "Quantity: **" + qtySold + "**",
+          "Sell price: **₱" + sellPrice.toFixed(2) + " each**",
+          "Revenue: **₱" + totalRevenue.toFixed(2) + "**",
+          "Inventory cost preview: **₱" + estimatedCost.toFixed(2) + "**",
+          "",
+          "Selected inventory allocation:",
+          allocationSummary,
+          notes ? "\nNotes: " + notes : "",
+          "",
+          "Confirming will write the Sale Log row and the Cost Allocation for the selected inventory lot.",
+        ].join("\n"),
+        components: [confirmRow],
+      });
+    } catch (error) {
+      console.error("Failed to prepare sale:", error);
+      await interaction.editReply({ content: "I couldn't prepare that sale. Check the bot logs." });
     }
     return;
   }
@@ -919,13 +1109,13 @@ client.on(Events.InteractionCreate, async (interaction) => {
     }
 
     try {
-      const parsed = readV2InventoryWorkbook(workbookPath);
-      const selected = parsed.rows.find((row) => row.inventoryId === inventoryId && row.remainingQty > 0);
-
-      if (!selected) {
-        await interaction.update({ content: "That inventory record is no longer available for sale. Search again with **/sale**.", components: [] });
+      const cached = pendingSaleSelections.get(inventoryId);
+      pendingSaleSelections.delete(inventoryId);
+      if (!cached || cached.expiresAt <= Date.now()) {
+        await interaction.update({ content: "That search result has expired. Search again with **/sale**.", components: [] });
         return;
       }
+      const selected = cached.row;
 
       const details = [
         "**Selected Inventory**",
@@ -941,13 +1131,15 @@ client.on(Events.InteractionCreate, async (interaction) => {
         "The sale-entry dialogue will use this inventory record. Quantity and sell price will be entered next.",
       ].join("\n");
 
-      await interaction.update({
-        content: details,
-        components: [],
-      });
+      // Do not perform a Google Sheets read before showModal(). The component
+      // interaction can expire while waiting for Sheets; the entry modal will
+      // re-read and validate the lot when the user submits it.
+      await interaction.showModal(buildSaleEntryModal(selected));
     } catch (error) {
-      console.error("Failed to load selected inventory record:", error);
-      await interaction.update({ content: "I couldn't load that inventory record. Search again with **/sale**.", components: [] });
+      console.error("Failed to open selected inventory record:", error);
+      if (!interaction.replied && !interaction.deferred) {
+        await interaction.update({ content: "I couldn't open that inventory record. Search again with **/sale**.", components: [] });
+      }
     }
     return;
   }
@@ -1176,6 +1368,83 @@ client.on(Events.InteractionCreate, async (interaction) => {
   }
 
   if (!interaction.isButton()) return;
+
+  if (interaction.customId.startsWith("sale:confirm:")) {
+    const pendingId = interaction.customId.slice("sale:confirm:".length);
+    const pending = pendingSales.get(pendingId);
+    if (!pending) {
+      await interaction.update({ content: "This sale draft has expired. Run **/sale** again.", components: [] });
+      return;
+    }
+
+    await interaction.deferUpdate();
+    try {
+      if (process.env.GOOGLE_SHEETS_SYNC !== "true") {
+        throw new Error("Google Sheets sales persistence is not enabled. Set GOOGLE_SHEETS_SYNC=true before recording sales.");
+      }
+      const allocationIds = await readGoogleSheetAllocationIds();
+      let maxAllocation = 0;
+      for (const id of allocationIds) {
+        const match = id.match(/^ALLOC-(\\d+)$/i);
+        if (match) maxAllocation = Math.max(maxAllocation, Number(match[1]));
+      }
+      const allocations = pending.allocations.map((allocation, index) => ({
+        allocationId: "ALLOC-" + String(maxAllocation + index + 1).padStart(6, "0"),
+        inventoryId: allocation.inventoryId,
+        qty: allocation.qty,
+      }));
+
+      await writeSaleToGoogleSheets({
+        saleId: pending.saleId,
+        cardKey: pending.draft.cardKey,
+        inventoryId: pending.draft.inventoryId,
+        cardName: pending.draft.cardName,
+        setSeries: pending.draft.setSeries,
+        cardNumber: pending.draft.cardNumber,
+        rarity: pending.draft.rarity,
+        condition: pending.draft.condition,
+        language: pending.draft.language,
+        variantPrinting: pending.draft.variantPrinting,
+        dateSold: pending.draft.dateSold,
+        qtySold: pending.draft.qtySold,
+        sellPrice: pending.draft.sellPrice,
+        notes: pending.draft.notes,
+        allocations,
+      });
+      pendingSales.delete(pendingId);
+      await interaction.editReply({
+        content: [
+          "✅ **Sale recorded**",
+          "",
+          "Sale ID: **" + pending.saleId + "**",
+          "Card: **" + pending.draft.cardName + " — " + pending.draft.cardNumber + "**",
+          "Quantity: **" + pending.draft.qtySold + "**",
+          "Sell price: **₱" + pending.draft.sellPrice.toFixed(2) + " each**",
+          "Inventory allocation: **" + allocations.length + " lot(s)**",
+          "The Sales Log and Cost Allocation were written together.",
+        ].join("\n"),
+        components: [],
+      });
+    } catch (error) {
+      console.error("Failed to record sale:", error);
+      await interaction.editReply({
+        content: "❌ The sale was not recorded. " + (error instanceof Error ? error.message : "Check the bot logs."),
+        components: [],
+      });
+    }
+    return;
+  }
+
+  if (interaction.customId.startsWith("sale:cancel:")) {
+    const pendingId = interaction.customId.slice("sale:cancel:".length);
+    const pending = pendingSales.get(pendingId);
+    pendingSales.delete(pendingId);
+    await interaction.update({
+      content: pending ? "Sale cancelled. No spreadsheet changes were made." : "Sale draft expired. No spreadsheet changes were made.",
+      components: [],
+    });
+    return;
+  }
 
   const [prefix, action, transactionId] = interaction.customId.split(":");
   if (prefix !== "invoice" || !action || !transactionId) return;
