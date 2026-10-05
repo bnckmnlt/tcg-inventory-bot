@@ -161,9 +161,13 @@ test("inserts the first card into row 4 of a clean starter workbook and preserve
     assert.deepEqual(styleMap(outputXml, 4), styleMap(sourceXml, 49));
     assert.deepEqual(styleMap(outputXml, 5), styleMap(sourceXml, 5));
 
+    const sourceDashboardXml = dashboardSheetXml(source);
+    const sourceDashboardA6 = sourceDashboardXml.match(/<c r="A6"[^>]*>/)?.[0];
+    assert.ok(sourceDashboardA6);
+
     const dashboardXml = dashboardSheetXml(output);
-    assert.ok(dashboardXml.includes('<c r="A6" s="10"><f>SUM(Inventory!$M$4:$M$5000)</f></c>'));
-    assert.ok(!dashboardXml.includes('<c r="A6" s="10"><f>SUM(Inventory!$M$4:$M$5000)</f><v>'))
+    assert.ok(dashboardXml.includes(sourceDashboardA6 + '<f>SUM(Inventory!$M$4:$M$5000)</f></c>'));
+    assert.ok(!dashboardXml.includes(sourceDashboardA6 + '<f>SUM(Inventory!$M$4:$M$5000)</f><v>'))
   });
 });
 

@@ -194,24 +194,54 @@ async function existingInventoryIds(token: string, spreadsheetId: string, sheetN
   );
 }
 
+async function copyInventoryFormatting(
+  token: string,
+  spreadsheetId: string,
+  sheetName: string,
+  startRow: number,
+  count: number,
+): Promise<void> {
+  if (count <= 0) return;
+  const metadataUrl = `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(spreadsheetId)}?fields=sheets.properties`;
+  const metadata = await sheetsRequest<{ sheets?: Array<{ properties?: { sheetId?: number; title?: string } }> }>(token, metadataUrl);
+  const sheetId = (metadata.sheets ?? []).find((sheet) => sheet.properties?.title === sheetName)?.properties?.sheetId;
+  if (sheetId === undefined) throw new Error(`Google Sheets Inventory tab "${sheetName}" ID was not found.`);
+
+  const url = `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(spreadsheetId)}:batchUpdate`;
+  await sheetsRequest(token, url, {
+    method: "POST",
+    body: JSON.stringify({
+      requests: [{
+        copyPaste: {
+          source: { sheetId, startRowIndex: 48, endRowIndex: 49, startColumnIndex: 0, endColumnIndex: 25 },
+          destination: { sheetId, startRowIndex: startRow - 1, endRowIndex: startRow - 1 + count, startColumnIndex: 0, endColumnIndex: 25 },
+          pasteType: "PASTE_FORMAT",
+        },
+      }],
+    }),
+  });
+}
+
 async function appendRows(
   token: string,
   spreadsheetId: string,
   sheetName: string,
   rows: ParsedV2InventoryRow[],
-): Promise<number> {
-  if (rows.length === 0) return 0;
+): Promise<{ count: number; startRow: number }> {
+  if (rows.length === 0) return { count: 0, startRow: 0 };
 
   const url =
     `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(spreadsheetId)}/values/${range(sheetName, "A:Y")}:append?valueInputOption=USER_ENTERED&insertDataOption=OVERWRITE`;
-  await sheetsRequest(token, url, {
+  const result = await sheetsRequest<{ updates?: { updatedRange?: string } }>(token, url, {
     method: "POST",
     body: JSON.stringify({
       majorDimension: "ROWS",
       values: rows.map(rowValues),
     }),
   });
-  return rows.length;
+  const match = result.updates?.updatedRange?.match(/!(?:[A-Z]+)(\d+)(?::[A-Z]+\d+)?$/);
+  if (!match) throw new Error("Google Sheets did not return the appended Inventory row.");
+  return { count: rows.length, startRow: Number(match[1]) };
 }
 
 export async function syncWorkbookInventoryToGoogleSheets(workbookPath: string): Promise<{ inserted: number; skipped: number }> {
@@ -232,9 +262,12 @@ export async function syncWorkbookInventoryToGoogleSheets(workbookPath: string):
     await backupGoogleSheetTab(token, config.spreadsheetId, sheetName);
   }
   await ensureHeaderRow(token, config.spreadsheetId, sheetName);
-  const inserted = await appendRows(token, config.spreadsheetId, sheetName, pending);
+  const appendResult = await appendRows(token, config.spreadsheetId, sheetName, pending);
+  if (appendResult.count > 0) {
+    await copyInventoryFormatting(token, config.spreadsheetId, sheetName, appendResult.startRow, appendResult.count);
+  }
 
-  return { inserted, skipped: parsed.rows.length - inserted };
+  return { inserted: appendResult.count, skipped: parsed.rows.length - appendResult.count };
 }
 
 export async function appendInventoryRowsToGoogleSheets(
@@ -310,9 +343,12 @@ export async function appendParsedInventoryRowsToGoogleSheets(
     await backupGoogleSheetTab(token, config.spreadsheetId, sheetName);
   }
   await ensureHeaderRow(token, config.spreadsheetId, sheetName);
-  const inserted = await appendRows(token, config.spreadsheetId, sheetName, pending);
+  const appendResult = await appendRows(token, config.spreadsheetId, sheetName, pending);
+  if (appendResult.count > 0) {
+    await copyInventoryFormatting(token, config.spreadsheetId, sheetName, appendResult.startRow, appendResult.count);
+  }
 
-  return { inserted, skipped: rows.length - inserted };
+  return { inserted: appendResult.count, skipped: rows.length - appendResult.count };
 }
 
 interface SheetValueRange {
