@@ -57,6 +57,7 @@ import {
 import { buildSaleCardKey, buildSelectedLotSalePlan, type SaleDraft } from "./inventory/sales.js";
 import { searchInventory } from "./inventory/search.js";
 import { countInventoryAlerts, getInventoryAlerts } from "./inventory/alerts.js";
+import { buildInventoryBriefing } from "./inventory/briefing.js";
 
 const token = process.env.DISCORD_TOKEN;
 const invoiceChannelId = process.env.INVOICE_CHANNEL_ID;
@@ -759,6 +760,14 @@ client.once(Events.ClientReady, async (readyClient) => {
     if (existingInventorySearch) await existingInventorySearch.edit(inventorySearchCommand);
     else await readyClient.application.commands.create(inventorySearchCommand, guild.id);
 
+    const existingInventoryBriefing = commands.find((command) => command.name === "inventory-briefing");
+    const inventoryBriefingCommand = {
+      name: "inventory-briefing",
+      description: "Show an inventory and sales performance summary",
+    };
+    if (existingInventoryBriefing) await existingInventoryBriefing.edit(inventoryBriefingCommand);
+    else await readyClient.application.commands.create(inventoryBriefingCommand, guild.id);
+
     const existingInventoryAlerts = commands.find((command) => command.name === "inventory-alerts");
     const inventoryAlertsCommand = {
       name: "inventory-alerts",
@@ -1013,6 +1022,67 @@ client.on(Events.MessageCreate, async (message: Message) => {
 });
 
 client.on(Events.InteractionCreate, async (interaction) => {
+  if (interaction.isChatInputCommand() && interaction.commandName === "inventory-briefing") {
+    if (!workbookPath) {
+      await interaction.reply({ content: "Inventory briefing is not configured because INVENTORY_WORKBOOK_PATH is missing.", flags: MessageFlags.Ephemeral });
+      return;
+    }
+
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    try {
+      const rows = process.env.GOOGLE_SHEETS_SYNC === "true" && !invoiceTestMode
+        ? await readGoogleSheetInventoryRows()
+        : readV2InventoryWorkbook(workbookPath).rows;
+      const parsedThreshold = Number.parseInt(process.env.INVENTORY_LOW_STOCK_THRESHOLD ?? "2", 10);
+      const threshold = Number.isFinite(parsedThreshold) && parsedThreshold > 0 ? parsedThreshold : 2;
+      const briefing = buildInventoryBriefing(rows, threshold);
+
+      const bestSellers = briefing.bestSellers.length
+        ? briefing.bestSellers.map((item, index) =>
+            (index + 1) + ". **" + truncateDiscord(item.cardName, 55) + "** — " + item.qtySold + " sold • ₱" + item.revenue.toFixed(2) + " revenue"
+          ).join("\n")
+        : "No recorded sales yet.";
+
+      const topSellers = briefing.topSellers.length
+        ? briefing.topSellers.map((item, index) =>
+            (index + 1) + ". **" + truncateDiscord(item.seller, 55) + "** — " + item.qtyPurchased + " purchased • ₱" + item.totalCost.toFixed(2)
+          ).join("\n")
+        : "No supplier data yet.";
+
+      const embed = new EmbedBuilder()
+        .setTitle("Inventory Briefing")
+        .setDescription("Current inventory position and recorded sales performance.")
+        .addFields(
+          { name: "Inventory", value: [
+            "Lots: **" + briefing.lots + "**",
+            "Purchased: **" + briefing.qtyPurchased + "** units",
+            "Sold: **" + briefing.qtySold + "** units",
+            "Remaining: **" + briefing.remainingQty + "** units",
+            "Sell-through: **" + briefing.soldThroughPct.toFixed(1) + "%**",
+          ].join("\n"), inline: true },
+          { name: "Financial", value: [
+            "Purchase cost: **₱" + briefing.totalCost.toFixed(2) + "**",
+            "Remaining cost basis: **₱" + briefing.remainingCost.toFixed(2) + "**",
+            "Revenue: **₱" + briefing.revenue.toFixed(2) + "**",
+            "Realized P/L: **₱" + briefing.realizedProfit.toFixed(2) + "**",
+          ].join("\n"), inline: true },
+          { name: "Attention", value: [
+            "Sold out lots: **" + briefing.soldOutLots + "**",
+            "Low stock lots: **" + briefing.lowStockLots + "**",
+            "Low-stock threshold: **" + threshold + "**",
+          ].join("\n"), inline: true },
+          { name: "Best-Selling Cards", value: bestSellers, inline: false },
+          { name: "Top Sellers / Suppliers", value: topSellers, inline: false },
+        );
+
+      await interaction.editReply({ embeds: [embed] });
+    } catch (error) {
+      console.error("Failed to build inventory briefing:", error);
+      await interaction.editReply({ content: "I couldn't build the Inventory Briefing right now." });
+    }
+    return;
+  }
+
   if (interaction.isChatInputCommand() && interaction.commandName === "inventory-alerts") {
     if (!workbookPath) {
       await interaction.reply({ content: "Inventory alerts are not configured because INVENTORY_WORKBOOK_PATH is missing.", flags: MessageFlags.Ephemeral });
