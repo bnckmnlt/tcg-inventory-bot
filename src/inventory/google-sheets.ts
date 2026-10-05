@@ -403,6 +403,43 @@ export interface GoogleSaleWriteInput {
   allocations: Array<{ allocationId: string; inventoryId: string; qty: number }>;
 }
 
+export interface GoogleBriefingSaleRecord {
+  cardKey: string;
+  inventoryId: string;
+  cardName: string;
+  setSeries: string;
+  cardNumber: string;
+  rarity?: string;
+  condition: string;
+  language: string;
+  variantPrinting: string;
+  qtySold: number;
+  revenue: number;
+  cost: number;
+  profit: number;
+}
+
+export async function readGoogleSheetSalesLog(): Promise<GoogleBriefingSaleRecord[]> {
+  const config = loadConfig();
+  const token = await getAccessToken(config.credentials);
+  const [sales] = await readBatchValues(token, config.spreadsheetId, [quotedSheetRange("Sales Log", "A4:P5000")]);
+  return (sales?.values ?? []).filter((row) => String(row[0] ?? "").trim()).map((row) => ({
+    cardKey: String(row[1] ?? "").trim(),
+    inventoryId: String(row[2] ?? "").trim(),
+    cardName: String(row[3] ?? "").trim(),
+    setSeries: String(row[4] ?? "").trim(),
+    cardNumber: String(row[5] ?? "").trim(),
+    rarity: String(row[6] ?? "").trim() || undefined,
+    condition: String(row[7] ?? "").trim(),
+    language: String(row[8] ?? "").trim(),
+    variantPrinting: String(row[9] ?? "").trim() || "Normal",
+    qtySold: Number(String(row[11] ?? "").replace(/[,₱]/g, "")) || 0,
+    revenue: Number(String(row[13] ?? "").replace(/[,₱]/g, "")) || 0,
+    cost: Number(String(row[14] ?? "").replace(/[,₱]/g, "")) || 0,
+    profit: Number(String(row[15] ?? "").replace(/[,₱]/g, "")) || 0,
+  }));
+}
+
 export async function readGoogleSheetSaleIds(): Promise<string[]> {
   const config = loadConfig();
   const token = await getAccessToken(config.credentials);

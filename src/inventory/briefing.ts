@@ -1,5 +1,21 @@
 import type { ParsedV2InventoryRow } from "./v2-workbook.js";
 
+export interface BriefingSaleRecord {
+  cardKey: string;
+  inventoryId: string;
+  cardName: string;
+  setSeries: string;
+  cardNumber: string;
+  rarity?: string;
+  condition: string;
+  language: string;
+  variantPrinting: string;
+  qtySold: number;
+  revenue: number;
+  cost: number;
+  profit: number;
+}
+
 export interface InventoryBriefing {
   lots: number;
   qtyPurchased: number;
@@ -27,7 +43,11 @@ function cardKey(row: ParsedV2InventoryRow): string {
     .map((value) => String(value || "").trim().toUpperCase()).join("|");
 }
 
-export function buildInventoryBriefing(rows: ParsedV2InventoryRow[], lowStockThreshold = 2): InventoryBriefing {
+export function buildInventoryBriefing(
+  rows: ParsedV2InventoryRow[],
+  lowStockThreshold = 2,
+  sales: BriefingSaleRecord[] = [],
+): InventoryBriefing {
   let qtyPurchased = 0;
   let qtySold = 0;
   let remainingQty = 0;
@@ -75,6 +95,27 @@ export function buildInventoryBriefing(rows: ParsedV2InventoryRow[], lowStockThr
     currentSeller.totalCost += cost;
     currentSeller.lots++;
     sellers.set(seller, currentSeller);
+  }
+
+  // Sales performance is authoritative from Sales Log when supplied. Inventory
+  // remains authoritative for stock/cost/supplier totals.
+  if (sales.length > 0) {
+    cards.clear();
+    qtySold = 0;
+    revenue = 0;
+    realizedProfit = 0;
+    for (const sale of sales) {
+      qtySold += sale.qtySold;
+      revenue += sale.revenue;
+      realizedProfit += sale.profit;
+      if (sale.qtySold <= 0 && sale.revenue === 0) continue;
+      const key = sale.cardKey || [sale.cardName, sale.setSeries, sale.cardNumber, sale.rarity || "", sale.condition, sale.language, sale.variantPrinting || "Normal"]
+        .map((value) => String(value || "").trim().toUpperCase()).join("|");
+      const current = cards.get(key) ?? { cardName: sale.cardName, setSeries: sale.setSeries, cardNumber: sale.cardNumber, qtySold: 0, revenue: 0 };
+      current.qtySold += sale.qtySold;
+      current.revenue += sale.revenue;
+      cards.set(key, current);
+    }
   }
 
   const bestSellers = [...cards.entries()]

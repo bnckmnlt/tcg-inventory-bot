@@ -94,13 +94,17 @@ function worksheetRows(path: string, target: string, strings: string[]): unknown
   return rows;
 }
 
-export function readV2InventoryWorkbook(path: string): V2WorkbookParseResult {
+export function readV2WorkbookSheet(path: string, sheetName: string): unknown[][] {
   if (!existsSync(path)) throw new Error(`Workbook not found: ${path}`);
+  const sheet = sheetEntries(path).find((entry) => entry.name.toLowerCase() === sheetName.toLowerCase());
+  if (!sheet) return [];
+  return worksheetRows(path, sheet.target, sharedStrings(path));
+}
 
-  const inventory = sheetEntries(path).find((sheet) => sheet.name.toLowerCase() === "inventory");
-  if (!inventory) {
+export function readV2InventoryWorkbook(path: string): V2WorkbookParseResult {
+  const rows = readV2WorkbookSheet(path, "Inventory");
+  if (rows.length === 0) {
     return { rows: [], issues: [{ sourceRow: 1, message: 'Workbook has no "Inventory" sheet.' }] };
   }
-
-  return parseV2InventorySheet(worksheetRows(path, inventory.target, sharedStrings(path)));
+  return parseV2InventorySheet(rows);
 }

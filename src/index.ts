@@ -20,7 +20,7 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { copyFile, mkdir, readFile, writeFile } from "node:fs/promises";
-import { readV2InventoryWorkbook } from "./inventory/read-xlsx.js";
+import { readV2InventoryWorkbook, readV2WorkbookSheet } from "./inventory/read-xlsx.js";
 import type { ParsedV2InventoryRow } from "./inventory/v2-workbook.js";
 import { createInventoryBackup } from "./inventory/backup.js";
 import { downloadInvoice } from "./invoice.js";
@@ -31,7 +31,7 @@ import type { Catalog } from "./catalog/types.js";
 import { planInvoiceIngestion, purchaseIdentityKeys, type IngestionPlan } from "./inventory/ingest.js";
 import { createJsonInventoryStore } from "./inventory/json-store.js";
 import { invoicePlanToWorkbookRows, persistInvoicePlanToWorkbookSafely, persistSaleToWorkbook, readWorkbookIds } from "./inventory/workbook-persistence.js";
-import { appendInventoryRowsDirectToGoogleSheets, readGoogleSheetAllocationIds, readGoogleSheetInventoryRows, readGoogleSheetSaleIds, writeSaleToGoogleSheets } from "./inventory/google-sheets.js";
+import { appendInventoryRowsDirectToGoogleSheets, readGoogleSheetAllocationIds, readGoogleSheetInventoryRows, readGoogleSheetSalesLog, readGoogleSheetSaleIds, writeSaleToGoogleSheets } from "./inventory/google-sheets.js";
 import {
   createPendingTransaction,
   getPendingTransaction,
@@ -57,7 +57,7 @@ import {
 import { buildSaleCardKey, buildSelectedLotSalePlan, type SaleDraft } from "./inventory/sales.js";
 import { searchInventory } from "./inventory/search.js";
 import { countInventoryAlerts, getInventoryAlerts } from "./inventory/alerts.js";
-import { buildInventoryBriefing } from "./inventory/briefing.js";
+import { buildInventoryBriefing, type BriefingSaleRecord } from "./inventory/briefing.js";
 
 const token = process.env.DISCORD_TOKEN;
 const invoiceChannelId = process.env.INVOICE_CHANNEL_ID;
@@ -167,6 +167,29 @@ async function invoicePageFingerprint(
   const hash = createHash("sha256").update(invoicePageContentFingerprint(invoice));
   if (filePath) hash.update(await readFile(filePath));
   return hash.digest("hex");
+}
+
+function readLocalSalesLog(workbook: string): BriefingSaleRecord[] {
+  const rows = readV2WorkbookSheet(workbook, "Sales Log");
+  const header = (rows.findIndex((row) => String(row[0] ?? "").trim().toLowerCase() === "sale id"));
+  if (header < 0) return [];
+  return rows.slice(header + 1)
+    .filter((row) => String(row[0] ?? "").trim())
+    .map((row) => ({
+      cardKey: String(row[1] ?? "").trim(),
+      inventoryId: String(row[2] ?? "").trim(),
+      cardName: String(row[3] ?? "").trim(),
+      setSeries: String(row[4] ?? "").trim(),
+      cardNumber: String(row[5] ?? "").trim(),
+      rarity: String(row[6] ?? "").trim() || undefined,
+      condition: String(row[7] ?? "").trim(),
+      language: String(row[8] ?? "").trim(),
+      variantPrinting: String(row[9] ?? "").trim() || "Normal",
+      qtySold: Number(String(row[11] ?? "").replace(/[,₱]/g, "")) || 0,
+      revenue: Number(String(row[13] ?? "").replace(/[,₱]/g, "")) || 0,
+      cost: Number(String(row[14] ?? "").replace(/[,₱]/g, "")) || 0,
+      profit: Number(String(row[15] ?? "").replace(/[,₱]/g, "")) || 0,
+    }));
 }
 
 function formatMoney(amount: number | null, currency: string | null): string {
@@ -1030,12 +1053,16 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
     try {
-      const rows = process.env.GOOGLE_SHEETS_SYNC === "true" && !invoiceTestMode
+      const useGoogleSheets = process.env.GOOGLE_SHEETS_SYNC === "true" && !invoiceTestMode;
+      const rows = useGoogleSheets
         ? await readGoogleSheetInventoryRows()
         : readV2InventoryWorkbook(workbookPath).rows;
+      const sales = useGoogleSheets
+        ? await readGoogleSheetSalesLog()
+        : readLocalSalesLog(workbookPath);
       const parsedThreshold = Number.parseInt(process.env.INVENTORY_LOW_STOCK_THRESHOLD ?? "2", 10);
       const threshold = Number.isFinite(parsedThreshold) && parsedThreshold > 0 ? parsedThreshold : 2;
-      const briefing = buildInventoryBriefing(rows, threshold);
+      const briefing = buildInventoryBriefing(rows, threshold, sales);
 
       const bestSellers = briefing.bestSellers.length
         ? briefing.bestSellers.map((item, index) =>
