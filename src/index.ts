@@ -21,6 +21,7 @@ import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { copyFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import { readV2InventoryWorkbook } from "./inventory/read-xlsx.js";
+import type { ParsedV2InventoryRow } from "./inventory/v2-workbook.js";
 import { createInventoryBackup } from "./inventory/backup.js";
 import { downloadInvoice } from "./invoice.js";
 import { extractInvoice } from "./extract.js";
@@ -54,6 +55,8 @@ import {
   type InvoicePage,
 } from "./transaction.js";
 import { buildSaleCardKey, buildSelectedLotSalePlan, type SaleDraft } from "./inventory/sales.js";
+import { searchInventory } from "./inventory/search.js";
+import { countInventoryAlerts, getInventoryAlerts } from "./inventory/alerts.js";
 
 const token = process.env.DISCORD_TOKEN;
 const invoiceChannelId = process.env.INVOICE_CHANNEL_ID;
@@ -442,6 +445,7 @@ async function withSalePersistenceLock<T>(operation: () => Promise<T>): Promise<
 // modal immediately. Discord gives component interactions only a short response
 // window, while Google Sheets reads can exceed it.
 const pendingSaleSelections = new Map<string, { row: ReturnType<typeof readV2InventoryWorkbook>["rows"][number]; expiresAt: number }>();
+const pendingInventorySelections = new Map<string, { row: ParsedV2InventoryRow; expiresAt: number }>();
 const SALE_SELECTION_TTL_MS = 10 * 60 * 1000;
 
 function buildSaleEntryModal(row: ReturnType<typeof readV2InventoryWorkbook>["rows"][number]) {
@@ -483,6 +487,21 @@ function buildSaleEntryModal(row: ReturnType<typeof readV2InventoryWorkbook>["ro
       new ActionRowBuilder<TextInputBuilder>().addComponents(date),
       new ActionRowBuilder<TextInputBuilder>().addComponents(notes),
     );
+}
+
+function buildInventorySearchModal() {
+  const input = new TextInputBuilder()
+    .setCustomId("inventory-search-query")
+    .setLabel("Search inventory")
+    .setStyle(TextInputStyle.Short)
+    .setPlaceholder("Card name, set, number, rarity, seller, Inventory ID, etc.")
+    .setRequired(false)
+    .setMaxLength(100);
+
+  return new ModalBuilder()
+    .setCustomId("inventory:search")
+    .setTitle("Search Inventory")
+    .addComponents(new ActionRowBuilder<TextInputBuilder>().addComponents(input));
 }
 
 function buildSaleSearchModal() {
@@ -555,6 +574,24 @@ function buildSaleInventoryMenu(rows: ReturnType<typeof readV2InventoryWorkbook>
     available,
     row: new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(menu),
   };
+}
+
+function inventorySearchEmbed(row: ParsedV2InventoryRow) {
+  const status = row.remainingQty <= 0 ? "Sold Out" : row.remainingQty <= 2 ? "Low Stock" : "In Stock";
+  return new EmbedBuilder()
+    .setTitle(row.cardName)
+    .setDescription([row.setSeries, row.cardNumber ? "#" + row.cardNumber : "", row.rarity ?? "", row.variantPrinting || "Normal"].filter(Boolean).join(" • "))
+    .addFields(
+      { name: "Inventory ID", value: row.inventoryId, inline: true },
+      { name: "Remaining", value: String(row.remainingQty), inline: true },
+      { name: "Status", value: status, inline: true },
+      { name: "Condition", value: row.condition || "—", inline: true },
+      { name: "Language", value: row.language || "—", inline: true },
+      { name: "Unit Cost", value: row.unitCost == null ? "—" : "₱" + row.unitCost.toFixed(2), inline: true },
+      { name: "Purchased", value: row.qtyPurchased == null ? "—" : String(row.qtyPurchased), inline: true },
+      { name: "Seller", value: row.seller || "—", inline: true },
+      { name: "Order ID", value: row.orderId || "—", inline: true },
+    );
 }
 
 async function loadCatalog(): Promise<Catalog> {
@@ -713,6 +750,22 @@ client.once(Events.ClientReady, async (readyClient) => {
     };
     if (existingReview) await existingReview.edit(reviewCommand);
     else await readyClient.application.commands.create(reviewCommand, guild.id);
+
+    const existingInventorySearch = commands.find((command) => command.name === "inventory-search");
+    const inventorySearchCommand = {
+      name: "inventory-search",
+      description: "Search inventory records",
+    };
+    if (existingInventorySearch) await existingInventorySearch.edit(inventorySearchCommand);
+    else await readyClient.application.commands.create(inventorySearchCommand, guild.id);
+
+    const existingInventoryAlerts = commands.find((command) => command.name === "inventory-alerts");
+    const inventoryAlertsCommand = {
+      name: "inventory-alerts",
+      description: "Show inventory records that need attention",
+    };
+    if (existingInventoryAlerts) await existingInventoryAlerts.edit(inventoryAlertsCommand);
+    else await readyClient.application.commands.create(inventoryAlertsCommand, guild.id);
 
     const existingSale = commands.find((command) => command.name === "sale");
     const saleCommand = {
@@ -960,6 +1013,146 @@ client.on(Events.MessageCreate, async (message: Message) => {
 });
 
 client.on(Events.InteractionCreate, async (interaction) => {
+  if (interaction.isChatInputCommand() && interaction.commandName === "inventory-alerts") {
+    if (!workbookPath) {
+      await interaction.reply({ content: "Inventory alerts are not configured because INVENTORY_WORKBOOK_PATH is missing.", flags: MessageFlags.Ephemeral });
+      return;
+    }
+
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    try {
+      const rows = process.env.GOOGLE_SHEETS_SYNC === "true" && !invoiceTestMode
+        ? await readGoogleSheetInventoryRows()
+        : readV2InventoryWorkbook(workbookPath).rows;
+      const parsedThreshold = Number.parseInt(process.env.INVENTORY_LOW_STOCK_THRESHOLD ?? "2", 10);
+      const threshold = Number.isFinite(parsedThreshold) && parsedThreshold > 0 ? parsedThreshold : 2;
+      const summary = countInventoryAlerts(rows, threshold);
+      const alerts = getInventoryAlerts(rows, { lowStockThreshold: threshold, limit: 50 });
+
+      if (alerts.length === 0) {
+        await interaction.editReply({
+          content: [
+            "Inventory Alerts",
+            "No sold-out or low-stock records need attention.",
+            "Low-stock threshold: **" + threshold + "** remaining unit(s).",
+          ].join("\n"),
+        });
+        return;
+      }
+
+      const alertEmbeds: EmbedBuilder[] = [];
+      for (let start = 0; start < alerts.length; start += 25) {
+        const embed = new EmbedBuilder()
+          .setTitle(start === 0 ? "Inventory Alerts" : "Inventory Alerts — continued")
+          .setDescription(
+            start === 0
+              ? "Sold out: **" + summary.soldOut + "** • Low stock: **" + summary.lowStock + "** • Total: **" + summary.total + "**\nLow-stock threshold: **" + threshold + "** remaining unit(s)."
+              : "Additional inventory alerts.",
+          );
+        alerts.slice(start, start + 25).forEach((alert) => {
+          const row = alert.row;
+          const marker = alert.type === "SOLD_OUT" ? "SOLD OUT" : "LOW STOCK";
+          embed.addFields({
+            name: marker + " — " + truncateDiscord(row.cardName, 80),
+            value: [
+              "Inventory: " + row.inventoryId,
+              "Set: " + (row.setSeries || "Unknown") + (row.cardNumber ? " • #" + row.cardNumber : ""),
+              "Remaining: **" + row.remainingQty + "**" + (row.rarity ? " • " + row.rarity : "") + (row.variantPrinting ? " • " + row.variantPrinting : ""),
+            ].join("\n"),
+            inline: false,
+          });
+        });
+        alertEmbeds.push(embed);
+      }
+
+      await interaction.editReply({
+        content: summary.total > alerts.length ? "Showing the first " + alerts.length + " alerts." : undefined,
+        embeds: alertEmbeds,
+      });
+    } catch (error) {
+      console.error("Failed to read inventory alerts:", error);
+      await interaction.editReply({ content: "I couldn't read the Inventory sheet right now." });
+    }
+    return;
+  }
+
+  if (interaction.isChatInputCommand() && interaction.commandName === "inventory-search") {
+    if (!workbookPath) {
+      await interaction.reply({ content: "Inventory search is not configured because INVENTORY_WORKBOOK_PATH is missing.", flags: MessageFlags.Ephemeral });
+      return;
+    }
+    await interaction.showModal(buildInventorySearchModal());
+    return;
+  }
+
+  if (interaction.isModalSubmit() && interaction.customId === "inventory:search") {
+    if (!workbookPath) {
+      await interaction.reply({ content: "Inventory search is not configured because INVENTORY_WORKBOOK_PATH is missing.", flags: MessageFlags.Ephemeral });
+      return;
+    }
+    const query = interaction.fields.getTextInputValue("inventory-search-query").trim();
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    try {
+      const rows = process.env.GOOGLE_SHEETS_SYNC === "true" && !invoiceTestMode
+        ? await readGoogleSheetInventoryRows()
+        : readV2InventoryWorkbook(workbookPath).rows;
+      const results = searchInventory(rows, query, { includeSoldOut: true, limit: 25 });
+      if (results.length === 0) {
+        await interaction.editReply({ content: query ? "No inventory records matched **" + query + "**." : "There are no inventory records to display." });
+        return;
+      }
+
+      const menu = new StringSelectMenuBuilder()
+        .setCustomId("inventory:select")
+        .setPlaceholder("Select an inventory record");
+      for (const result of results) {
+        const row = result.row;
+        menu.addOptions(
+          new StringSelectMenuOptionBuilder()
+            .setLabel((row.cardName + " — " + (row.cardNumber || "No #")).slice(0, 100))
+            .setDescription((row.setSeries + " • " + (row.variantPrinting || "Normal") + " • Qty: " + row.remainingQty).slice(0, 100))
+            .setValue(row.inventoryId),
+        );
+      }
+
+      const now = Date.now();
+      for (const [key, value] of pendingInventorySelections) {
+        if (value.expiresAt <= now) pendingInventorySelections.delete(key);
+      }
+      for (const result of results) {
+        pendingInventorySelections.set(result.row.inventoryId, {
+          row: result.row,
+          expiresAt: now + SALE_SELECTION_TTL_MS,
+        });
+      }
+
+      await interaction.editReply({
+        content: [
+          query ? "Inventory search results for **" + query + "**:" : "Inventory:",
+          results.length === 25 ? "Showing the first 25 matches." : "Found **" + results.length + "** matching record(s).",
+          "Select a record to view its details.",
+        ].join("\n"),
+        components: [new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(menu)],
+      });
+    } catch (error) {
+      console.error("Failed to search inventory:", error);
+      await interaction.editReply({ content: "I couldn't read the Inventory sheet right now." });
+    }
+    return;
+  }
+
+  if (interaction.isStringSelectMenu() && interaction.customId === "inventory:select") {
+    const inventoryId = interaction.values[0];
+    const cached = pendingInventorySelections.get(inventoryId);
+    if (!cached || cached.expiresAt <= Date.now()) {
+      await interaction.update({ content: "That search result has expired. Run **/inventory-search** again.", components: [] });
+      return;
+    }
+    pendingInventorySelections.delete(inventoryId);
+    await interaction.update({ content: "", embeds: [inventorySearchEmbed(cached.row)], components: [] });
+    return;
+  }
+
   if (interaction.isChatInputCommand() && interaction.commandName === "sale") {
     if (!workbookPath) {
       await interaction.reply({ content: "Sales search is not configured because INVENTORY_WORKBOOK_PATH is missing.", flags: MessageFlags.Ephemeral });
