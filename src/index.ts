@@ -58,6 +58,21 @@ import { buildSaleCardKey, buildSelectedLotSalePlan, type SaleDraft } from "./in
 import { searchInventory } from "./inventory/search.js";
 import { countInventoryAlerts, getInventoryAlerts } from "./inventory/alerts.js";
 import { buildInventoryBriefing, type BriefingSaleRecord } from "./inventory/briefing.js";
+import {
+  DISCORD_ICONS,
+  DISCORD_COLORS,
+  withIcon,
+  inventorySearchEmbed,
+  inventorySearchResultsEmbed,
+  inventorySearchEmptyEmbed,
+  saleSearchResultsEmbed,
+  saleSearchEmptyEmbed,
+  saleReviewEmbed,
+  selectedInventoryEmbed,
+  salePreparationErrorEmbed,
+  inventoryAlertsEmbeds,
+  inventoryAlertsEmptyEmbed,
+} from "./discord/presentation.js";
 
 const token = process.env.DISCORD_TOKEN;
 const invoiceChannelId = process.env.INVOICE_CHANNEL_ID;
@@ -623,24 +638,6 @@ function buildSaleInventoryMenu(rows: ReturnType<typeof readV2InventoryWorkbook>
   };
 }
 
-function inventorySearchEmbed(row: ParsedV2InventoryRow) {
-  const status = row.remainingQty <= 0 ? "Sold Out" : row.remainingQty <= 2 ? "Low Stock" : "In Stock";
-  return new EmbedBuilder()
-    .setTitle(row.cardName)
-    .setDescription([row.setSeries, row.cardNumber ? "#" + row.cardNumber : "", row.rarity ?? "", row.variantPrinting || "Normal"].filter(Boolean).join(" • "))
-    .addFields(
-      { name: "Inventory ID", value: row.inventoryId, inline: true },
-      { name: "Remaining", value: String(row.remainingQty), inline: true },
-      { name: "Status", value: status, inline: true },
-      { name: "Condition", value: row.condition || "—", inline: true },
-      { name: "Language", value: row.language || "—", inline: true },
-      { name: "Unit Cost", value: row.unitCost == null ? "—" : "₱" + row.unitCost.toFixed(2), inline: true },
-      { name: "Purchased", value: row.qtyPurchased == null ? "—" : String(row.qtyPurchased), inline: true },
-      { name: "Seller", value: row.seller || "—", inline: true },
-      { name: "Order ID", value: row.orderId || "—", inline: true },
-    );
-}
-
 async function loadCatalog(): Promise<Catalog> {
   const { readFile } = await import("node:fs/promises");
   return JSON.parse(await readFile(catalogPath, "utf8")) as Catalog;
@@ -784,6 +781,148 @@ async function buildPlan(
   return { catalog: workingCatalog, plan };
 }
 
+function inventoryStatusGroups(rows: ParsedV2InventoryRow[], threshold: number) {
+  const grouped = (items: ParsedV2InventoryRow[]) => {
+    const map = new Map<string, { name: string; setSeries: string; cardNumber: string; rarity: string; qty: number; lots: number }>();
+    for (const row of items) {
+      const key = [row.cardName, row.setSeries, row.cardNumber, row.rarity ?? "", row.condition, row.language, row.variantPrinting].join("|");
+      const current = map.get(key) ?? {
+        name: row.cardName,
+        setSeries: row.setSeries,
+        cardNumber: row.cardNumber,
+        rarity: row.rarity ?? "",
+        qty: 0,
+        lots: 0,
+      };
+      current.qty += Math.max(0, row.remainingQty);
+      current.lots += 1;
+      map.set(key, current);
+    }
+    return [...map.values()].sort((a, b) => b.qty - a.qty || a.name.localeCompare(b.name));
+  };
+
+  return {
+    inStock: grouped(rows.filter((row) => row.remainingQty > threshold)),
+    lowStock: grouped(rows.filter((row) => row.remainingQty > 0 && row.remainingQty <= threshold)),
+    soldOut: grouped(rows.filter((row) => row.remainingQty <= 0)),
+  };
+}
+
+function inventoryStatusText(
+  items: ReturnType<typeof inventoryStatusGroups>["inStock"],
+  emptyText: string,
+  limit = 10,
+): string {
+  if (items.length === 0) return emptyText;
+  return items.slice(0, limit).map((item, index) => {
+    const identity = [item.name, item.setSeries, item.cardNumber, item.rarity].filter(Boolean).join(" — ");
+    const lotText = item.lots > 1 ? ` • ${item.lots} lots` : "";
+    return `${index + 1}. **${truncateDiscord(identity, 70)}** — ${item.qty} unit${item.qty === 1 ? "" : "s"}${lotText}`;
+  }).join("\n");
+}
+
+function buildInventoryBriefingEmbeds(
+  rows: ParsedV2InventoryRow[],
+  briefing: ReturnType<typeof buildInventoryBriefing>,
+  threshold: number,
+): EmbedBuilder[] {
+  const groups = inventoryStatusGroups(rows, threshold);
+  const bestSellers = briefing.bestSellers.length
+    ? briefing.bestSellers.map((item, index) =>
+        `${index + 1}. **${truncateDiscord(item.cardName, 55)}** — ${item.qtySold} sold • ₱${item.revenue.toFixed(2)}`
+      ).join("\n")
+    : "No recorded sales yet.";
+  const topSellers = briefing.topSellers.length
+    ? briefing.topSellers.map((item, index) =>
+        `${index + 1}. **${truncateDiscord(item.seller, 55)}** — ${item.qtyPurchased} purchased • ₱${item.totalCost.toFixed(2)}`
+      ).join("\n")
+    : "No supplier data yet.";
+
+  const summary = withIcon(new EmbedBuilder()
+    .setColor(DISCORD_COLORS.primary)
+    .setTitle("Inventory Briefing")
+    .setDescription([
+      "Current inventory position, stock health, and sales performance.",
+      "",
+      `**Stock health:** ${groups.inStock.length} in stock • ${groups.lowStock.length} low stock • ${groups.soldOut.length} sold out`,
+      `**Low-stock threshold:** ${threshold} unit${threshold === 1 ? "" : "s"}`,
+    ].join("\n"))
+    .addFields(
+      {
+        name: "Inventory",
+        value: [
+          `Lots: **${briefing.lots}**`,
+          `Purchased: **${briefing.qtyPurchased}** units`,
+          `Sold: **${briefing.qtySold}** units`,
+          `Remaining: **${briefing.remainingQty}** units`,
+          `Sell-through: **${briefing.soldThroughPct.toFixed(1)}%**`,
+        ].join("\n"),
+        inline: true,
+      },
+      {
+        name: "Financial",
+        value: [
+          `Purchase cost: **₱${briefing.totalCost.toFixed(2)}**`,
+          `Remaining cost basis: **₱${briefing.remainingCost.toFixed(2)}**`,
+          `Revenue: **₱${briefing.revenue.toFixed(2)}**`,
+          `Realized P/L: **₱${briefing.realizedProfit.toFixed(2)}**`,
+        ].join("\n"),
+        inline: true,
+      },
+      {
+        name: "Stock Status",
+        value: [
+          `In stock: **${groups.inStock.length}**`,
+          `Low stock: **${groups.lowStock.length}**`,
+          `Sold out: **${groups.soldOut.length}**`,
+        ].join("\n"),
+        inline: true,
+      },
+    )
+    .setFooter({ text: "Stock status is based on current remaining quantity." })
+    .setTimestamp(), DISCORD_ICONS.package);
+
+  const statusIcon = groups.soldOut.length > 0
+    ? DISCORD_ICONS.xCircle
+    : groups.lowStock.length > 0
+      ? DISCORD_ICONS.warningCircle
+      : DISCORD_ICONS.checkCircle;
+
+  const status = withIcon(new EmbedBuilder()
+    .setTitle("Stock Status")
+    .setDescription("Statuses are mutually exclusive: healthy stock, low stock, or sold out.")
+    .setColor(groups.soldOut.length > 0 ? 0xed4245 : groups.lowStock.length > 0 ? 0xfee75c : 0x57f287)
+    .addFields(
+      {
+        name: "IN STOCK",
+        value: inventoryStatusText(groups.inStock, "No cards above the low-stock threshold."),
+        inline: false,
+      },
+      {
+        name: "LOW STOCK",
+        value: inventoryStatusText(groups.lowStock, "No cards currently at or below the low-stock threshold."),
+        inline: false,
+      },
+      {
+        name: "SOLD OUT",
+        value: inventoryStatusText(groups.soldOut, "No sold-out cards."),
+        inline: false,
+      },
+    )
+    .setFooter({ text: "Sold out means current remaining quantity is 0; it does not mean the card has never sold." }), statusIcon);
+
+  const salesEmbed = withIcon(new EmbedBuilder()
+    .setColor(0x9b59b6)
+    .setTitle("Sales & Purchase Performance")
+    .addFields(
+      { name: "Best-Selling Cards", value: bestSellers, inline: true },
+      { name: "Top Sellers / Suppliers", value: topSellers, inline: true },
+    )
+    .setTimestamp(), DISCORD_ICONS.chartLineUp);
+
+  return [summary, status, salesEmbed];
+}
+
 async function buildInventoryBriefingMessage() {
   if (!workbookPath) throw new Error("INVENTORY_WORKBOOK_PATH is missing.");
   const useGoogleSheets = process.env.GOOGLE_SHEETS_SYNC === "true" && !invoiceTestMode;
@@ -793,49 +932,11 @@ async function buildInventoryBriefingMessage() {
   const threshold = Number.isFinite(thresholdValue) && thresholdValue > 0 ? thresholdValue : 2;
   const briefing = buildInventoryBriefing(rows, threshold, sales);
 
-  const grouped = (items: ParsedV2InventoryRow[], limit = 10) => {
-    const map = new Map<string, { name: string; qty: number; lots: number }>();
-    for (const row of items) {
-      const key = [row.cardName, row.setSeries, row.cardNumber, row.rarity ?? "", row.condition, row.language, row.variantPrinting].join("|");
-      const current = map.get(key) ?? { name: row.cardName, qty: 0, lots: 0 };
-      current.qty += Math.max(0, row.remainingQty);
-      current.lots += 1;
-      map.set(key, current);
-    }
-    return [...map.values()].sort((a, b) => b.qty - a.qty || a.name.localeCompare(b.name)).slice(0, limit);
+  return {
+    embeds: buildInventoryBriefingEmbeds(rows, briefing, threshold),
+    components: [inventoryBriefingButtons()],
   };
-
-  const inStock = grouped(rows.filter((row) => row.remainingQty > 0), 12);
-  const soldOut = grouped(rows.filter((row) => row.remainingQty <= 0), 12);
-  const inStockText = inStock.length
-    ? inStock.map((item, i) => (i + 1) + ". **" + truncateDiscord(item.name, 48) + "** — " + item.qty + " available" + (item.lots > 1 ? " • " + item.lots + " lots" : "")).join("\n")
-    : "No cards currently available to sell.";
-  const soldOutText = soldOut.length
-    ? soldOut.map((item, i) => (i + 1) + ". **" + truncateDiscord(item.name, 48) + "** — sold out").join("\n")
-    : "No sold-out cards.";
-  const bestSellers = briefing.bestSellers.length
-    ? briefing.bestSellers.map((item, i) => (i + 1) + ". **" + truncateDiscord(item.cardName, 55) + "** — " + item.qtySold + " sold • ₱" + item.revenue.toFixed(2)).join("\n")
-    : "No recorded sales yet.";
-  const topSellers = briefing.topSellers.length
-    ? briefing.topSellers.map((item, i) => (i + 1) + ". **" + truncateDiscord(item.seller, 55) + "** — " + item.qtyPurchased + " purchased • ₱" + item.totalCost.toFixed(2)).join("\n")
-    : "No supplier data yet.";
-
-  const embed = new EmbedBuilder()
-    .setTitle("Inventory Briefing")
-    .setDescription("Daily snapshot of stock availability, sales performance, and purchase activity.")
-    .setTimestamp()
-    .addFields(
-      { name: "Stock Position", value: "**" + briefing.remainingQty + "** units available • **" + briefing.lots + "** lots\nSell-through: **" + briefing.soldThroughPct.toFixed(1) + "%**", inline: true },
-      { name: "Financial", value: "Revenue: **₱" + briefing.revenue.toFixed(2) + "**\nRealized P/L: **₱" + briefing.realizedProfit.toFixed(2) + "**", inline: true },
-      { name: "Attention", value: "Sold out: **" + briefing.soldOutLots + "** lots\nLow stock: **" + briefing.lowStockLots + "** lots", inline: true },
-      { name: "In Stock — Available to Sell", value: inStockText, inline: true },
-      { name: "Sold Out", value: soldOutText, inline: true },
-      { name: "Best-Selling Cards", value: bestSellers, inline: false },
-      { name: "Top Sellers / Suppliers", value: topSellers, inline: false },
-    );
-  return { embeds: [embed], components: [inventoryBriefingButtons()] };
 }
-
 function nextBriefingDelayMs(): number {
   const now = new Date();
   const parts = Object.fromEntries(new Intl.DateTimeFormat("en-US", {
@@ -1189,24 +1290,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
       const threshold = Number.isFinite(parsedThreshold) && parsedThreshold > 0 ? parsedThreshold : 2;
       const summary = countInventoryAlerts(rows, threshold);
       const alerts = getInventoryAlerts(rows, { lowStockThreshold: threshold, limit: 50 });
-      const embeds: EmbedBuilder[] = [];
-      for (let start = 0; start < alerts.length; start += 25) {
-        const embed = new EmbedBuilder()
-          .setTitle(start === 0 ? "Inventory Alerts" : "Inventory Alerts — continued")
-          .setDescription("Sold out: **" + summary.soldOut + "** • Low stock: **" + summary.lowStock + "** • Total: **" + summary.total + "**")
-          .setTimestamp();
-        alerts.slice(start, start + 25).forEach((alert) => {
-          embed.addFields({
-            name: (alert.type === "SOLD_OUT" ? "SOLD OUT" : "LOW STOCK") + " — " + truncateDiscord(alert.row.cardName, 80),
-            value: "Inventory: " + alert.row.inventoryId + "\nRemaining: **" + alert.row.remainingQty + "**" + (alert.row.setSeries ? " • " + alert.row.setSeries : ""),
-            inline: false,
-          });
-        });
-        embeds.push(embed);
-      }
       await interaction.editReply({
-        content: alerts.length ? undefined : "No sold-out or low-stock records need attention.",
-        embeds,
+        embeds: alerts.length ? inventoryAlertsEmbeds(alerts, summary, threshold, truncateDiscord) : [inventoryAlertsEmptyEmbed(threshold)],
         components: [inventoryAlertsButtons()],
       });
     } catch (error) {
@@ -1235,53 +1320,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
       const threshold = Number.isFinite(parsedThreshold) && parsedThreshold > 0 ? parsedThreshold : 2;
       const briefing = buildInventoryBriefing(rows, threshold, sales);
 
-      const bestSellers = briefing.bestSellers.length
-        ? briefing.bestSellers.map((item, index) =>
-            (index + 1) + ". **" + truncateDiscord(item.cardName, 55) + "** — " + item.qtySold + " sold • ₱" + item.revenue.toFixed(2) + " revenue"
-          ).join("\n")
-        : "No recorded sales yet.";
-
-      const topSellers = briefing.topSellers.length
-        ? briefing.topSellers.map((item, index) =>
-            (index + 1) + ". **" + truncateDiscord(item.seller, 55) + "** — " + item.qtyPurchased + " purchased • ₱" + item.totalCost.toFixed(2)
-          ).join("\n")
-        : "No supplier data yet.";
-
-      const embed = new EmbedBuilder()
-        .setTitle("Inventory Briefing")
-        .setDescription("Current inventory position and recorded sales performance.")
-        .addFields(
-          { name: "Inventory", value: [
-            "Lots: **" + briefing.lots + "**",
-            "Purchased: **" + briefing.qtyPurchased + "** units",
-            "Sold: **" + briefing.qtySold + "** units",
-            "Remaining: **" + briefing.remainingQty + "** units",
-            "Sell-through: **" + briefing.soldThroughPct.toFixed(1) + "%**",
-          ].join("\n"), inline: true },
-          { name: "Financial", value: [
-            "Purchase cost: **₱" + briefing.totalCost.toFixed(2) + "**",
-            "Remaining cost basis: **₱" + briefing.remainingCost.toFixed(2) + "**",
-            "Revenue: **₱" + briefing.revenue.toFixed(2) + "**",
-            "Realized P/L: **₱" + briefing.realizedProfit.toFixed(2) + "**",
-          ].join("\n"), inline: true },
-          { name: "Attention", value: [
-            "Sold out lots: **" + briefing.soldOutLots + "**",
-            "Low stock lots: **" + briefing.lowStockLots + "**",
-            "Low-stock threshold: **" + threshold + "**",
-          ].join("\n"), inline: true },
-          { name: "In Stock — Available to Sell", value: (() => {
-            const values = rows.filter((row) => row.remainingQty > 0).slice(0, 12);
-            return values.length ? values.map((row, i) => (i + 1) + ". **" + truncateDiscord(row.cardName, 48) + "** — " + row.remainingQty + " available").join("\n") : "No cards currently available to sell.";
-          })(), inline: true },
-          { name: "Sold Out", value: (() => {
-            const values = rows.filter((row) => row.remainingQty <= 0).slice(0, 12);
-            return values.length ? values.map((row, i) => (i + 1) + ". **" + truncateDiscord(row.cardName, 48) + "** — sold out").join("\n") : "No sold-out cards.";
-          })(), inline: true },
-          { name: "Best-Selling Cards", value: bestSellers, inline: false },
-          { name: "Top Sellers / Suppliers", value: topSellers, inline: false },
-        );
-
-      await interaction.editReply({ embeds: [embed], components: [inventoryBriefingButtons()] });
+      await interaction.editReply({
+        embeds: buildInventoryBriefingEmbeds(rows, briefing, threshold),
+        components: [inventoryBriefingButtons()],
+      });
     } catch (error) {
       console.error("Failed to build inventory briefing:", error);
       await interaction.editReply({ content: "I couldn't build the Inventory Briefing right now." });
@@ -1305,46 +1347,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
       const summary = countInventoryAlerts(rows, threshold);
       const alerts = getInventoryAlerts(rows, { lowStockThreshold: threshold, limit: 50 });
 
-      if (alerts.length === 0) {
-        await interaction.editReply({
-          content: [
-            "Inventory Alerts",
-            "No sold-out or low-stock records need attention.",
-            "Low-stock threshold: **" + threshold + "** remaining unit(s).",
-          ].join("\n"),
-          components: [inventoryAlertsButtons()],
-        });
-        return;
-      }
-
-      const alertEmbeds: EmbedBuilder[] = [];
-      for (let start = 0; start < alerts.length; start += 25) {
-        const embed = new EmbedBuilder()
-          .setTitle(start === 0 ? "Inventory Alerts" : "Inventory Alerts — continued")
-          .setDescription(
-            start === 0
-              ? "Sold out: **" + summary.soldOut + "** • Low stock: **" + summary.lowStock + "** • Total: **" + summary.total + "**\nLow-stock threshold: **" + threshold + "** remaining unit(s)."
-              : "Additional inventory alerts.",
-          );
-        alerts.slice(start, start + 25).forEach((alert) => {
-          const row = alert.row;
-          const marker = alert.type === "SOLD_OUT" ? "SOLD OUT" : "LOW STOCK";
-          embed.addFields({
-            name: marker + " — " + truncateDiscord(row.cardName, 80),
-            value: [
-              "Inventory: " + row.inventoryId,
-              "Set: " + (row.setSeries || "Unknown") + (row.cardNumber ? " • #" + row.cardNumber : ""),
-              "Remaining: **" + row.remainingQty + "**" + (row.rarity ? " • " + row.rarity : "") + (row.variantPrinting ? " • " + row.variantPrinting : ""),
-            ].join("\n"),
-            inline: false,
-          });
-        });
-        alertEmbeds.push(embed);
-      }
-
       await interaction.editReply({
         content: summary.total > alerts.length ? "Showing the first " + alerts.length + " alerts." : undefined,
-        embeds: alertEmbeds,
+        embeds: alerts.length ? inventoryAlertsEmbeds(alerts, summary, threshold, truncateDiscord) : [inventoryAlertsEmptyEmbed(threshold)],
         components: [inventoryAlertsButtons()],
       });
     } catch (error) {
@@ -1376,7 +1381,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         : readV2InventoryWorkbook(workbookPath).rows;
       const results = searchInventory(rows, query, { includeSoldOut: true, limit: 25 });
       if (results.length === 0) {
-        await interaction.editReply({ content: query ? "No inventory records matched **" + query + "**." : "There are no inventory records to display.", components: [inventorySearchButtons()] });
+        await interaction.editReply({ embeds: [inventorySearchEmptyEmbed(query)], components: [inventorySearchButtons()] });
         return;
       }
 
@@ -1405,11 +1410,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       }
 
       await interaction.editReply({
-        content: [
-          query ? "Inventory search results for **" + query + "**:" : "Inventory:",
-          results.length === 25 ? "Showing the first 25 matches." : "Found **" + results.length + "** matching record(s).",
-          "Select a record to view its details.",
-        ].join("\n"),
+        embeds: [inventorySearchResultsEmbed(query, results.length, 25)],
         components: [
           new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(menu),
           inventorySearchButtons(),
@@ -1459,11 +1460,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       const { available, row } = buildSaleInventoryMenu(rows, query);
 
       if (available.length === 0) {
-        await interaction.editReply({
-          content: query
-            ? `No available inventory records matched **${query}**. Search by card name, set, card number, rarity, condition, variant, or Inventory ID.`
-            : "There is no available inventory to sell.",
-        });
+        await interaction.editReply({ embeds: [saleSearchEmptyEmbed(query)] });
         return;
       }
 
@@ -1476,11 +1473,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       }
 
       await interaction.editReply({
-        content: [
-          query ? `Search results for **${query}**:` : "Available inventory:",
-          available.length === 25 ? "Showing the first 25 matches." : `Found **${available.length}** matching record(s).`,
-          "Select the exact inventory record below to continue the sale.",
-        ].join("\n"),
+        embeds: [saleSearchResultsEmbed(query, available.length, 25)],
         components: [row],
       });
     } catch (error) {
@@ -1585,26 +1578,23 @@ client.on(Events.InteractionCreate, async (interaction) => {
         new ButtonBuilder().setCustomId("sale:cancel:" + pendingId).setLabel("Cancel").setStyle(ButtonStyle.Secondary),
       );
       await interaction.editReply({
-        content: [
-          "🧾 **Sale Review**",
-          "",
-          "**" + selected.cardName + " — " + selected.cardNumber + "**",
-          selected.setSeries + " • " + (selected.rarity || "Rarity not set") + " • " + (selected.variantPrinting || "Normal"),
-          selected.condition + " • " + selected.language,
-          "Inventory: **" + selected.inventoryId + "**",
-          "",
-          "Date sold: **" + dateSold + "**",
-          "Quantity: **" + qtySold + "**",
-          "Sell price: **₱" + sellPrice.toFixed(2) + " each**",
-          "Revenue: **₱" + totalRevenue.toFixed(2) + "**",
-          "Inventory cost preview: **₱" + estimatedCost.toFixed(2) + "**",
-          "",
-          "Selected inventory lot allocation:",
+        embeds: [saleReviewEmbed({
+          cardName: selected.cardName,
+          cardNumber: selected.cardNumber,
+          setSeries: selected.setSeries,
+          rarity: selected.rarity || "",
+          variant: selected.variantPrinting || "Normal",
+          condition: selected.condition,
+          language: selected.language,
+          inventoryId: selected.inventoryId,
+          dateSold,
+          qtySold,
+          sellPrice,
+          totalRevenue,
+          estimatedCost,
           allocationSummary,
-          notes ? "\nNotes: " + notes : "",
-          "",
-          "Confirming will write the Sale Log row and Cost Allocation for this selected inventory lot only.",
-        ].join("\n"),
+          notes,
+        })],
         components: [confirmRow],
       });
     } catch (error) {
@@ -1614,7 +1604,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         ? message
         : "I couldn't prepare that sale. Please try the sale again.";
       await interaction.editReply({
-        content: "❌ **Sale could not be prepared**\n\n" + userMessage,
+        embeds: [salePreparationErrorEmbed(userMessage)],
       });
     }
     return;
@@ -1636,20 +1626,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return;
       }
       const selected = cached.row;
-
-      const details = [
-        "**Selected Inventory**",
-        "",
-        `**${selected.cardName} — ${selected.cardNumber}**`,
-        `${selected.setSeries} • ${selected.rarity || "Rarity not set"} • ${selected.variantPrinting || "Normal"}`,
-        `${selected.condition} • ${selected.language}`,
-        "",
-        `Inventory ID: **${selected.inventoryId}**`,
-        `Available: **${selected.remainingQty}**`,
-        `Unit Cost: **₱${selected.unitCost.toFixed(2)}**`,
-        "",
-        "The sale-entry dialogue will use this inventory record. Quantity and sell price will be entered next.",
-      ].join("\n");
 
       // Do not perform a Google Sheets read before showModal(). The component
       // interaction can expire while waiting for Sheets; the entry modal will
