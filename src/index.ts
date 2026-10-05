@@ -62,6 +62,8 @@ import { buildInventoryBriefing, type BriefingSaleRecord } from "./inventory/bri
 const token = process.env.DISCORD_TOKEN;
 const invoiceChannelId = process.env.INVOICE_CHANNEL_ID;
 const purchaseReviewChannelId = process.env.PURCHASE_REVIEW_CHANNEL_ID;
+const inventoryBriefingChannelId = process.env.INVENTORY_BRIEFING_CHANNEL_ID;
+const inventoryBriefingTimeZone = process.env.INVENTORY_BRIEFING_TIMEZONE ?? "Asia/Manila";
 
 if (!token) throw new Error("DISCORD_TOKEN is missing from .env");
 if (!invoiceChannelId) throw new Error("INVOICE_CHANNEL_ID is missing from .env");
@@ -190,6 +192,27 @@ function readLocalSalesLog(workbook: string): BriefingSaleRecord[] {
       cost: Number(String(row[14] ?? "").replace(/[,₱]/g, "")) || 0,
       profit: Number(String(row[15] ?? "").replace(/[,₱]/g, "")) || 0,
     }));
+}
+
+function inventoryBriefingButtons() {
+  return new ActionRowBuilder<ButtonBuilder>().addComponents(
+    new ButtonBuilder().setCustomId("inventory:briefing:refresh").setLabel("Refresh").setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId("inventory:alerts:open").setLabel("View Alerts").setStyle(ButtonStyle.Danger),
+    new ButtonBuilder().setCustomId("inventory:search:open").setLabel("Search Inventory").setStyle(ButtonStyle.Primary),
+  );
+}
+
+function inventoryAlertsButtons() {
+  return new ActionRowBuilder<ButtonBuilder>().addComponents(
+    new ButtonBuilder().setCustomId("inventory:alerts:refresh").setLabel("Refresh").setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId("inventory:search:open").setLabel("Search Inventory").setStyle(ButtonStyle.Primary),
+  );
+}
+
+function inventorySearchButtons() {
+  return new ActionRowBuilder<ButtonBuilder>().addComponents(
+    new ButtonBuilder().setCustomId("inventory:search:open").setLabel("New Search").setStyle(ButtonStyle.Primary),
+  );
 }
 
 function formatMoney(amount: number | null, currency: string | null): string {
@@ -470,6 +493,7 @@ async function withSalePersistenceLock<T>(operation: () => Promise<T>): Promise<
 // window, while Google Sheets reads can exceed it.
 const pendingSaleSelections = new Map<string, { row: ReturnType<typeof readV2InventoryWorkbook>["rows"][number]; expiresAt: number }>();
 const pendingInventorySelections = new Map<string, { row: ParsedV2InventoryRow; expiresAt: number }>();
+let inventoryBriefingTimer: NodeJS.Timeout | undefined;
 const SALE_SELECTION_TTL_MS = 10 * 60 * 1000;
 
 function buildSaleEntryModal(row: ReturnType<typeof readV2InventoryWorkbook>["rows"][number]) {
@@ -761,6 +785,92 @@ async function buildPlan(
   return { catalog: workingCatalog, plan };
 }
 
+async function buildInventoryBriefingMessage() {
+  if (!workbookPath) throw new Error("INVENTORY_WORKBOOK_PATH is missing.");
+  const useGoogleSheets = process.env.GOOGLE_SHEETS_SYNC === "true" && !invoiceTestMode;
+  const rows = useGoogleSheets ? await readGoogleSheetInventoryRows() : readV2InventoryWorkbook(workbookPath).rows;
+  const sales = useGoogleSheets ? await readGoogleSheetSalesLog() : readLocalSalesLog(workbookPath);
+  const thresholdValue = Number.parseInt(process.env.INVENTORY_LOW_STOCK_THRESHOLD ?? "2", 10);
+  const threshold = Number.isFinite(thresholdValue) && thresholdValue > 0 ? thresholdValue : 2;
+  const briefing = buildInventoryBriefing(rows, threshold, sales);
+
+  const grouped = (items: ParsedV2InventoryRow[], limit = 10) => {
+    const map = new Map<string, { name: string; qty: number; lots: number }>();
+    for (const row of items) {
+      const key = [row.cardName, row.setSeries, row.cardNumber, row.rarity ?? "", row.condition, row.language, row.variantPrinting].join("|");
+      const current = map.get(key) ?? { name: row.cardName, qty: 0, lots: 0 };
+      current.qty += Math.max(0, row.remainingQty);
+      current.lots += 1;
+      map.set(key, current);
+    }
+    return [...map.values()].sort((a, b) => b.qty - a.qty || a.name.localeCompare(b.name)).slice(0, limit);
+  };
+
+  const inStock = grouped(rows.filter((row) => row.remainingQty > 0), 12);
+  const soldOut = grouped(rows.filter((row) => row.remainingQty <= 0), 12);
+  const inStockText = inStock.length
+    ? inStock.map((item, i) => (i + 1) + ". **" + truncateDiscord(item.name, 48) + "** — " + item.qty + " available" + (item.lots > 1 ? " • " + item.lots + " lots" : "")).join("\n")
+    : "No cards currently available to sell.";
+  const soldOutText = soldOut.length
+    ? soldOut.map((item, i) => (i + 1) + ". **" + truncateDiscord(item.name, 48) + "** — sold out").join("\n")
+    : "No sold-out cards.";
+  const bestSellers = briefing.bestSellers.length
+    ? briefing.bestSellers.map((item, i) => (i + 1) + ". **" + truncateDiscord(item.cardName, 55) + "** — " + item.qtySold + " sold • ₱" + item.revenue.toFixed(2)).join("\n")
+    : "No recorded sales yet.";
+  const topSellers = briefing.topSellers.length
+    ? briefing.topSellers.map((item, i) => (i + 1) + ". **" + truncateDiscord(item.seller, 55) + "** — " + item.qtyPurchased + " purchased • ₱" + item.totalCost.toFixed(2)).join("\n")
+    : "No supplier data yet.";
+
+  const embed = new EmbedBuilder()
+    .setTitle("Inventory Briefing")
+    .setDescription("Daily snapshot of stock availability, sales performance, and purchase activity.")
+    .setTimestamp()
+    .addFields(
+      { name: "Stock Position", value: "**" + briefing.remainingQty + "** units available • **" + briefing.lots + "** lots\nSell-through: **" + briefing.soldThroughPct.toFixed(1) + "%**", inline: true },
+      { name: "Financial", value: "Revenue: **₱" + briefing.revenue.toFixed(2) + "**\nRealized P/L: **₱" + briefing.realizedProfit.toFixed(2) + "**", inline: true },
+      { name: "Attention", value: "Sold out: **" + briefing.soldOutLots + "** lots\nLow stock: **" + briefing.lowStockLots + "** lots", inline: true },
+      { name: "In Stock — Available to Sell", value: inStockText, inline: true },
+      { name: "Sold Out", value: soldOutText, inline: true },
+      { name: "Best-Selling Cards", value: bestSellers, inline: false },
+      { name: "Top Sellers / Suppliers", value: topSellers, inline: false },
+    );
+  return { embeds: [embed], components: [inventoryBriefingButtons()] };
+}
+
+function nextBriefingDelayMs(): number {
+  const now = new Date();
+  const parts = Object.fromEntries(new Intl.DateTimeFormat("en-US", {
+    timeZone: inventoryBriefingTimeZone,
+    year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false,
+  }).formatToParts(now).filter((part) => part.type !== "literal").map((part) => [part.type, Number(part.value)]));
+  const passed = parts.hour > 8 || (parts.hour === 8 && (parts.minute > 0 || parts.second > 0));
+  const dayOffset = passed ? 1 : 0;
+  const targetLocalAsUtc = Date.UTC(parts.year, parts.month - 1, parts.day + dayOffset, 8, 0, 0);
+  const localNowAsUtc = Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute, parts.second);
+  return Math.max(1000, targetLocalAsUtc - localNowAsUtc);
+}
+
+function scheduleDailyInventoryBriefing(readyClient: Client) {
+  if (!workbookPath) return;
+  if (inventoryBriefingTimer) clearTimeout(inventoryBriefingTimer);
+  inventoryBriefingTimer = setTimeout(async () => {
+    try {
+      const channel = inventoryBriefingChannelId
+        ? await readyClient.channels.fetch(inventoryBriefingChannelId)
+        : readyClient.channels.cache.find((candidate) => candidate.isTextBased() && "name" in candidate && candidate.name === "inventory-briefing");
+      if (channel?.isTextBased() && "send" in channel) await channel.send(await buildInventoryBriefingMessage());
+      else console.error("Inventory briefing channel not found. Set INVENTORY_BRIEFING_CHANNEL_ID or create #inventory-briefing.");
+    } catch (error) {
+      console.error("Failed to send scheduled inventory briefing:", error);
+    } finally {
+      scheduleDailyInventoryBriefing(readyClient);
+    }
+  }, nextBriefingDelayMs());
+  inventoryBriefingTimer.unref?.();
+  console.log("Daily inventory briefing scheduled for 08:00 " + inventoryBriefingTimeZone + ".");
+}
+
 client.once(Events.ClientReady, async (readyClient) => {
   console.log("Logged in as " + readyClient.user.tag);
   console.log("Inventory persistence: " + inventoryPath);
@@ -807,6 +917,7 @@ client.once(Events.ClientReady, async (readyClient) => {
     if (existingSale) await existingSale.edit(saleCommand);
     else await readyClient.application.commands.create(saleCommand, guild.id);
   }
+  scheduleDailyInventoryBriefing(readyClient);
 });
 
 client.on(Events.MessageCreate, async (message: Message) => {
@@ -1045,6 +1156,67 @@ client.on(Events.MessageCreate, async (message: Message) => {
 });
 
 client.on(Events.InteractionCreate, async (interaction) => {
+  if (interaction.isButton() && interaction.customId === "inventory:search:open") {
+    await interaction.showModal(buildInventorySearchModal());
+    return;
+  }
+
+  if (interaction.isButton() && interaction.customId === "inventory:briefing:refresh") {
+    if (!workbookPath) {
+      await interaction.reply({ content: "Inventory briefing is not configured because INVENTORY_WORKBOOK_PATH is missing.", flags: MessageFlags.Ephemeral });
+      return;
+    }
+    await interaction.deferUpdate();
+    try {
+      await interaction.editReply(await buildInventoryBriefingMessage());
+    } catch (error) {
+      console.error("Failed to refresh inventory briefing:", error);
+      await interaction.editReply({ content: "I couldn't refresh the Inventory Briefing right now.", embeds: [], components: [] });
+    }
+    return;
+  }
+
+  if (interaction.isButton() && (interaction.customId === "inventory:alerts:refresh" || interaction.customId === "inventory:alerts:open")) {
+    if (!workbookPath) {
+      await interaction.reply({ content: "Inventory alerts are not configured because INVENTORY_WORKBOOK_PATH is missing.", flags: MessageFlags.Ephemeral });
+      return;
+    }
+    await interaction.deferUpdate();
+    try {
+      const rows = process.env.GOOGLE_SHEETS_SYNC === "true" && !invoiceTestMode
+        ? await readGoogleSheetInventoryRows()
+        : readV2InventoryWorkbook(workbookPath).rows;
+      const parsedThreshold = Number.parseInt(process.env.INVENTORY_LOW_STOCK_THRESHOLD ?? "2", 10);
+      const threshold = Number.isFinite(parsedThreshold) && parsedThreshold > 0 ? parsedThreshold : 2;
+      const summary = countInventoryAlerts(rows, threshold);
+      const alerts = getInventoryAlerts(rows, { lowStockThreshold: threshold, limit: 50 });
+      const embeds: EmbedBuilder[] = [];
+      for (let start = 0; start < alerts.length; start += 25) {
+        const embed = new EmbedBuilder()
+          .setTitle(start === 0 ? "Inventory Alerts" : "Inventory Alerts — continued")
+          .setDescription("Sold out: **" + summary.soldOut + "** • Low stock: **" + summary.lowStock + "** • Total: **" + summary.total + "**")
+          .setTimestamp();
+        alerts.slice(start, start + 25).forEach((alert) => {
+          embed.addFields({
+            name: (alert.type === "SOLD_OUT" ? "SOLD OUT" : "LOW STOCK") + " — " + truncateDiscord(alert.row.cardName, 80),
+            value: "Inventory: " + alert.row.inventoryId + "\nRemaining: **" + alert.row.remainingQty + "**" + (alert.row.setSeries ? " • " + alert.row.setSeries : ""),
+            inline: false,
+          });
+        });
+        embeds.push(embed);
+      }
+      await interaction.editReply({
+        content: alerts.length ? undefined : "No sold-out or low-stock records need attention.",
+        embeds,
+        components: [inventoryAlertsButtons()],
+      });
+    } catch (error) {
+      console.error("Failed to refresh inventory alerts:", error);
+      await interaction.editReply({ content: "I couldn't refresh Inventory Alerts right now.", embeds: [], components: [] });
+    }
+    return;
+  }
+
   if (interaction.isChatInputCommand() && interaction.commandName === "inventory-briefing") {
     if (!workbookPath) {
       await interaction.reply({ content: "Inventory briefing is not configured because INVENTORY_WORKBOOK_PATH is missing.", flags: MessageFlags.Ephemeral });
@@ -1098,11 +1270,19 @@ client.on(Events.InteractionCreate, async (interaction) => {
             "Low stock lots: **" + briefing.lowStockLots + "**",
             "Low-stock threshold: **" + threshold + "**",
           ].join("\n"), inline: true },
+          { name: "In Stock — Available to Sell", value: (() => {
+            const values = rows.filter((row) => row.remainingQty > 0).slice(0, 12);
+            return values.length ? values.map((row, i) => (i + 1) + ". **" + truncateDiscord(row.cardName, 48) + "** — " + row.remainingQty + " available").join("\n") : "No cards currently available to sell.";
+          })(), inline: true },
+          { name: "Sold Out", value: (() => {
+            const values = rows.filter((row) => row.remainingQty <= 0).slice(0, 12);
+            return values.length ? values.map((row, i) => (i + 1) + ". **" + truncateDiscord(row.cardName, 48) + "** — sold out").join("\n") : "No sold-out cards.";
+          })(), inline: true },
           { name: "Best-Selling Cards", value: bestSellers, inline: false },
           { name: "Top Sellers / Suppliers", value: topSellers, inline: false },
         );
 
-      await interaction.editReply({ embeds: [embed] });
+      await interaction.editReply({ embeds: [embed], components: [inventoryBriefingButtons()] });
     } catch (error) {
       console.error("Failed to build inventory briefing:", error);
       await interaction.editReply({ content: "I couldn't build the Inventory Briefing right now." });
@@ -1133,6 +1313,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
             "No sold-out or low-stock records need attention.",
             "Low-stock threshold: **" + threshold + "** remaining unit(s).",
           ].join("\n"),
+          components: [inventoryAlertsButtons()],
         });
         return;
       }
@@ -1165,6 +1346,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       await interaction.editReply({
         content: summary.total > alerts.length ? "Showing the first " + alerts.length + " alerts." : undefined,
         embeds: alertEmbeds,
+        components: [inventoryAlertsButtons()],
       });
     } catch (error) {
       console.error("Failed to read inventory alerts:", error);
@@ -1195,7 +1377,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         : readV2InventoryWorkbook(workbookPath).rows;
       const results = searchInventory(rows, query, { includeSoldOut: true, limit: 25 });
       if (results.length === 0) {
-        await interaction.editReply({ content: query ? "No inventory records matched **" + query + "**." : "There are no inventory records to display." });
+        await interaction.editReply({ content: query ? "No inventory records matched **" + query + "**." : "There are no inventory records to display.", components: [inventorySearchButtons()] });
         return;
       }
 
@@ -1229,7 +1411,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
           results.length === 25 ? "Showing the first 25 matches." : "Found **" + results.length + "** matching record(s).",
           "Select a record to view its details.",
         ].join("\n"),
-        components: [new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(menu)],
+        components: [
+          new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(menu),
+          inventorySearchButtons(),
+        ],
       });
     } catch (error) {
       console.error("Failed to search inventory:", error);
