@@ -197,7 +197,6 @@ function readLocalSalesLog(workbook: string): BriefingSaleRecord[] {
 function inventoryBriefingButtons() {
   return new ActionRowBuilder<ButtonBuilder>().addComponents(
     new ButtonBuilder().setCustomId("inventory:briefing:refresh").setLabel("Refresh").setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId("inventory:alerts:open").setLabel("View Alerts").setStyle(ButtonStyle.Danger),
     new ButtonBuilder().setCustomId("inventory:search:open").setLabel("Search Inventory").setStyle(ButtonStyle.Primary),
   );
 }
