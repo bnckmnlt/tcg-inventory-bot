@@ -71,7 +71,7 @@ test("excludes sold-out lots whose last sale was before the range", () => {
   assert.equal(result.soldOut.length, 0);
 });
 
-test("treats a lot sold after the range as in stock during the requested range", () => {
+test("keeps a currently sold-out lot out of in-stock even when its final sale was after the range", () => {
   const result = findInventoryAvailability(
     [row({ remainingQty: 0, purchaseDate: "2026-09-01" })],
     [{ inventoryId: "INV-1", dateSold: "2026-10-15", qtySold: 1 }],
@@ -79,9 +79,9 @@ test("treats a lot sold after the range as in stock during the requested range",
     "2026-10-10",
   );
 
-  assert.equal(result.inStock.length, 1);
-  assert.equal(result.inStock[0].endDate, "2026-10-15");
-  assert.equal(result.soldOut.length, 0);
+  assert.equal(result.inStock.length, 0);
+  assert.equal(result.soldOut.length, 1);
+  assert.equal(result.soldOut[0].endDate, "2026-10-15");
 });
 
 test("does not treat a partial sale as a sold-out end date", () => {

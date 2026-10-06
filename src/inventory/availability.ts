@@ -132,23 +132,17 @@ export function findInventoryAvailability(
     if (lastSaleDate) {
       if (lastSaleDate < from) continue;
 
-      if (lastSaleDate <= to) {
-        result.soldOut.push({
-          row,
-          status: "SOLD_OUT",
-          startDate: purchaseDate,
-          endDate: lastSaleDate,
-          dateBasis: purchaseDate ? "PURCHASE_DATE" : "LAST_SALE_DATE",
-        });
-      } else {
-        result.inStock.push({
-          row,
-          status: "IN_STOCK",
-          startDate: purchaseDate,
-          endDate: lastSaleDate,
-          dateBasis: purchaseDate ? "PURCHASE_DATE" : "LAST_SALE_DATE",
-        });
-      }
+      // Status reflects the lot's current inventory state. A lot that is
+      // already sold out remains SOLD_OUT even when its final sale happened
+      // after the requested range; the date range only determines whether
+      // that lot overlaps the requested period.
+      result.soldOut.push({
+        row,
+        status: "SOLD_OUT",
+        startDate: purchaseDate,
+        endDate: lastSaleDate,
+        dateBasis: purchaseDate ? "PURCHASE_DATE" : "LAST_SALE_DATE",
+      });
       continue;
     }
 

@@ -264,11 +264,11 @@ function embedCharacterLength(embed: EmbedBuilder): number {
   ].filter((value): value is string => typeof value === "string").reduce((total, value) => total + value.length, 0);
 }
 
-function availabilityRecordValue(record: InventoryAvailabilityEmbedRecord): string {
+function availabilityRecordValue(record: InventoryAvailabilityEmbedRecord, showRemainingQty = true): string {
   return [
     `${record.setSeries || "Unknown"}${record.cardNumber ? ` • #${record.cardNumber}` : ""}`,
     [record.rarity, record.variantPrinting || "Normal", record.condition, record.language].filter(Boolean).join(" • "),
-    `Remaining: **${record.remainingQty}**`,
+    showRemainingQty ? `Remaining: **${record.remainingQty}**` : undefined,
   ].filter(Boolean).join("\n");
 }
 
@@ -325,7 +325,7 @@ export function inventoryAvailabilityEmbeds(
   for (const record of records) {
     const field = {
       name: record.cardName.slice(0, 256),
-      value: availabilityRecordValue(record).slice(0, 1024),
+      value: availabilityRecordValue(record, title !== "Sold Out").slice(0, 1024),
       inline: true,
     };
     const fieldLength = field.name.length + field.value.length;
