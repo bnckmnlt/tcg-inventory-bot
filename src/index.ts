@@ -895,29 +895,29 @@ async function buildPlan(
 }
 
 function inventoryStatusGroups(rows: ParsedV2InventoryRow[], threshold: number) {
-  const grouped = (items: ParsedV2InventoryRow[]) => {
-    const map = new Map<string, { name: string; setSeries: string; cardNumber: string; rarity: string; qty: number; lots: number }>();
-    for (const row of items) {
-      const key = [row.cardName, row.setSeries, row.cardNumber, row.rarity ?? "", row.condition, row.language, row.variantPrinting].join("|");
-      const current = map.get(key) ?? {
-        name: row.cardName,
-        setSeries: row.setSeries,
-        cardNumber: row.cardNumber,
-        rarity: row.rarity ?? "",
-        qty: 0,
-        lots: 0,
-      };
-      current.qty += Math.max(0, row.remainingQty);
-      current.lots += 1;
-      map.set(key, current);
-    }
-    return [...map.values()].sort((a, b) => b.qty - a.qty || a.name.localeCompare(b.name));
-  };
+  const map = new Map<string, { name: string; setSeries: string; cardNumber: string; rarity: string; qty: number; lots: number }>();
+
+  for (const row of rows) {
+    const key = [row.cardName, row.setSeries, row.cardNumber, row.rarity ?? "", row.condition, row.language, row.variantPrinting].join("|");
+    const current = map.get(key) ?? {
+      name: row.cardName,
+      setSeries: row.setSeries,
+      cardNumber: row.cardNumber,
+      rarity: row.rarity ?? "",
+      qty: 0,
+      lots: 0,
+    };
+    current.qty += Math.max(0, row.remainingQty);
+    current.lots += 1;
+    map.set(key, current);
+  }
+
+  const grouped = [...map.values()].sort((a, b) => b.qty - a.qty || a.name.localeCompare(b.name));
 
   return {
-    inStock: grouped(rows.filter((row) => row.remainingQty > threshold)),
-    lowStock: grouped(rows.filter((row) => row.remainingQty > 0 && row.remainingQty <= threshold)),
-    soldOut: grouped(rows.filter((row) => row.remainingQty <= 0)),
+    inStock: grouped.filter((item) => item.qty > threshold),
+    lowStock: grouped.filter((item) => item.qty > 0 && item.qty <= threshold),
+    soldOut: grouped.filter((item) => item.qty <= 0),
   };
 }
 
@@ -930,7 +930,8 @@ function inventoryStatusText(
   return items.slice(0, limit).map((item, index) => {
     const identity = [item.name, item.setSeries, item.cardNumber, item.rarity].filter(Boolean).join(" — ");
     const lotText = item.lots > 1 ? ` • ${item.lots} lots` : "";
-    return `${index + 1}. **${truncateDiscord(identity, 70)}** — ${item.qty} unit${item.qty === 1 ? "" : "s"}${lotText}`;
+    const quantityText = item.qty > 0 ? ` — ${item.qty} unit${item.qty === 1 ? "" : "s"}` : "";
+    return `${index + 1}. **${truncateDiscord(identity, 70)}**${quantityText}${lotText}`;
   }).join("\n");
 }
 
