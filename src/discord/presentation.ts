@@ -266,8 +266,7 @@ function embedCharacterLength(embed: EmbedBuilder): number {
 
 function availabilityRecordValue(record: InventoryAvailabilityEmbedRecord, showRemainingQty = true): string {
   return [
-    `${record.setSeries || "Unknown"}${record.cardNumber ? ` • #${record.cardNumber}` : ""}`,
-    [record.rarity, record.variantPrinting || "Normal", record.condition, record.language].filter(Boolean).join(" • "),
+    [record.condition, record.rarity].filter(Boolean).join(" • "),
     showRemainingQty ? `Remaining: **${record.remainingQty}**` : undefined,
   ].filter(Boolean).join("\n");
 }
