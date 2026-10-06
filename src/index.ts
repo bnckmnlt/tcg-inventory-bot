@@ -30,8 +30,8 @@ import { TCGdexRuntime } from "./catalog/runtime.js";
 import type { Catalog } from "./catalog/types.js";
 import { planInvoiceIngestion, purchaseIdentityKeys, type IngestionPlan } from "./inventory/ingest.js";
 import { createJsonInventoryStore } from "./inventory/json-store.js";
-import { invoicePlanToWorkbookRows, persistInvoicePlanToWorkbookSafely, persistSaleToWorkbook, readWorkbookIds } from "./inventory/workbook-persistence.js";
-import { appendInventoryRowsDirectToGoogleSheets, readGoogleSheetAllocationIds, readGoogleSheetInventoryRows, readGoogleSheetSalesLog, readGoogleSheetSaleIds, writeSaleToGoogleSheets } from "./inventory/google-sheets.js";
+import { editSaleInWorkbook, invoicePlanToWorkbookRows, persistInvoicePlanToWorkbookSafely, persistSaleToWorkbook, readWorkbookIds, rollbackSaleInWorkbook } from "./inventory/workbook-persistence.js";
+import { appendInventoryRowsDirectToGoogleSheets, editSaleInGoogleSheets, readGoogleSheetAllocationIds, readGoogleSheetInventoryRows, readGoogleSheetSalesLog, readGoogleSheetSaleIds, rollbackSaleInGoogleSheets, writeSaleToGoogleSheets } from "./inventory/google-sheets.js";
 import {
   createPendingTransaction,
   getPendingTransaction,
@@ -55,6 +55,7 @@ import {
   type InvoicePage,
 } from "./transaction.js";
 import { buildSaleCardKey, buildSelectedLotSalePlan, type SaleDraft } from "./inventory/sales.js";
+import { validateSaleEdit, type SaleManagementRecord } from "./inventory/sale-management.js";
 import { searchInventory } from "./inventory/search.js";
 import { findInventoryAvailability, type InventoryAvailabilitySale } from "./inventory/availability.js";
 import { countInventoryAlerts, getInventoryAlerts } from "./inventory/alerts.js";
@@ -71,6 +72,7 @@ import {
   saleReviewEmbed,
   selectedInventoryEmbed,
   salePreparationErrorEmbed,
+  saleManagementEmbed,
   inventoryAlertsEmbeds,
   inventoryAlertsEmptyEmbed,
   inventoryAvailabilitySummaryEmbed,
@@ -88,6 +90,7 @@ if (!invoiceChannelId) throw new Error("INVOICE_CHANNEL_ID is missing from .env"
 
 const catalogPath = path.resolve("data/catalog.json");
 const invoiceTestMode = process.env.INVOICE_TEST_MODE === "true";
+const useGoogleSheets = process.env.GOOGLE_SHEETS_SYNC === "true" && !invoiceTestMode;
 const productionInventoryPath = path.resolve("data/inventory.json");
 const productionWorkbookPath = process.env.INVENTORY_WORKBOOK_PATH
   ? path.resolve(process.env.INVENTORY_WORKBOOK_PATH)
@@ -196,6 +199,7 @@ function readLocalSalesLog(workbook: string): BriefingSaleRecord[] {
   return rows.slice(header + 1)
     .filter((row) => String(row[0] ?? "").trim())
     .map((row) => ({
+      saleId: String(row[0] ?? "").trim() || undefined,
       cardKey: String(row[1] ?? "").trim(),
       inventoryId: String(row[2] ?? "").trim(),
       cardName: String(row[3] ?? "").trim(),
@@ -211,6 +215,107 @@ function readLocalSalesLog(workbook: string): BriefingSaleRecord[] {
       cost: Number(String(row[14] ?? "").replace(/[,₱]/g, "")) || 0,
       profit: Number(String(row[15] ?? "").replace(/[,₱]/g, "")) || 0,
     }));
+}
+
+function localExcelDate(value: unknown): string | undefined {
+  if (typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value.trim())) return value.trim();
+  if (typeof value !== "number" || !Number.isFinite(value)) return undefined;
+  const millis = Date.UTC(1899, 11, 30) + value * 86_400_000;
+  return new Date(millis).toISOString().slice(0, 10);
+}
+
+function findLocalSale(workbook: string, saleId: string): SaleManagementRecord | undefined {
+  const rows = readV2WorkbookSheet(workbook, "Sales Log");
+  const header = rows.findIndex((row) => String(row[0] ?? "").trim().toLowerCase() === "sale id");
+  if (header < 0) return undefined;
+  const row = rows.slice(header + 1).find((candidate) => String(candidate[0] ?? "").trim() === saleId);
+  if (!row) return undefined;
+  const notes = String(row[16] ?? "").trim() || undefined;
+  const qtySold = Number(String(row[11] ?? "").replace(/[,₱]/g, "")) || 0;
+  const sellPrice = Number(String(row[12] ?? "").replace(/[,₱]/g, "")) || 0;
+  return {
+    saleId,
+    inventoryId: String(row[2] ?? "").trim(),
+    cardName: String(row[3] ?? "").trim(),
+    setSeries: String(row[4] ?? "").trim(),
+    cardNumber: String(row[5] ?? "").trim(),
+    rarity: String(row[6] ?? "").trim() || undefined,
+    condition: String(row[7] ?? "").trim(),
+    language: String(row[8] ?? "").trim(),
+    variantPrinting: String(row[9] ?? "").trim() || "Normal",
+    dateSold: localExcelDate(row[10]),
+    qtySold,
+    sellPrice,
+    revenue: Number(String(row[13] ?? "").replace(/[,₱]/g, "")) || qtySold * sellPrice,
+    cost: Number(String(row[14] ?? "").replace(/[,₱]/g, "")) || 0,
+    profit: Number(String(row[15] ?? "").replace(/[,₱]/g, "")) || 0,
+    notes,
+    voided: Boolean(notes?.includes("[VOIDED]")),
+  };
+}
+
+async function findSaleForManagement(saleId: string): Promise<SaleManagementRecord | undefined> {
+  if (useGoogleSheets) {
+    const sales = await readGoogleSheetSalesLog();
+    const row = sales.find((sale) => sale.saleId === saleId);
+    if (!row) return undefined;
+    const notes = row.notes;
+    return {
+      saleId,
+      inventoryId: row.inventoryId,
+      cardName: row.cardName,
+      setSeries: row.setSeries,
+      cardNumber: row.cardNumber,
+      rarity: row.rarity,
+      condition: row.condition,
+      language: row.language,
+      variantPrinting: row.variantPrinting,
+      dateSold: row.dateSold,
+      qtySold: row.qtySold,
+      sellPrice: row.sellPrice ?? (row.qtySold > 0 ? row.revenue / row.qtySold : 0),
+      revenue: row.revenue,
+      cost: row.cost,
+      profit: row.profit,
+      notes,
+      voided: row.qtySold === 0,
+    };
+  }
+  return findLocalSale(workbookPath!, saleId);
+}
+
+function buildSaleManageEditModal(record: SaleManagementRecord): ModalBuilder {
+  return new ModalBuilder()
+    .setCustomId("sale-manage:edit:" + record.saleId)
+    .setTitle("Edit Sale — " + record.saleId.slice(0, 20))
+    .addComponents(
+      new ActionRowBuilder<TextInputBuilder>().addComponents(
+        new TextInputBuilder()
+          .setCustomId("sale-manage-price")
+          .setLabel("Sell price per card (PHP)")
+          .setStyle(TextInputStyle.Short)
+          .setRequired(true)
+          .setValue(record.sellPrice.toFixed(2))
+          .setMaxLength(12),
+      ),
+      new ActionRowBuilder<TextInputBuilder>().addComponents(
+        new TextInputBuilder()
+          .setCustomId("sale-manage-date")
+          .setLabel("Date sold (YYYY-MM-DD)")
+          .setStyle(TextInputStyle.Short)
+          .setRequired(true)
+          .setValue(record.dateSold || new Date().toISOString().slice(0, 10))
+          .setMaxLength(10),
+      ),
+      new ActionRowBuilder<TextInputBuilder>().addComponents(
+        new TextInputBuilder()
+          .setCustomId("sale-manage-notes")
+          .setLabel("Notes (optional)")
+          .setStyle(TextInputStyle.Paragraph)
+          .setRequired(false)
+          .setValue(record.notes?.slice(0, 500) || "")
+          .setMaxLength(500),
+      ),
+    );
 }
 
 function inventoryBriefingButtons() {
@@ -1046,6 +1151,15 @@ client.once(Events.ClientReady, async (readyClient) => {
     };
     if (existingSale) await existingSale.edit(saleCommand);
     else await readyClient.application.commands.create(saleCommand, guild.id);
+
+    const existingSaleManage = commands.find((command) => command.name === "sale-manage");
+    const saleManageCommand = {
+      name: "sale-manage",
+      description: "View, edit, or rollback a recorded sale",
+      options: [{ type: 3, name: "sale_id", description: "Sale ID, e.g. SALE-000001", required: true }],
+    };
+    if (existingSaleManage) await existingSaleManage.edit(saleManageCommand);
+    else await readyClient.application.commands.create(saleManageCommand, guild.id);
   }
   scheduleDailyInventoryBriefing(readyClient);
 });
@@ -1456,13 +1570,46 @@ client.on(Events.InteractionCreate, async (interaction) => {
         ...inventoryAvailabilityEmbeds("Undated / Open Date", toEmbedRecords(availability.undated)),
       ];
 
-      // Discord accepts at most 10 embeds per message. Keep the initial
-      // interaction response separate and send additional pages as ephemeral
-      // follow-ups when the result is large.
-      for (let start = 0; start < embeds.length; start += 10) {
-        const page = embeds.slice(start, start + 10);
-        if (start === 0) await interaction.editReply({ embeds: page });
-        else await interaction.followUp({ embeds: page, flags: MessageFlags.Ephemeral });
+      // Discord limits both embed count and the aggregate character count
+      // across all embeds in a single message. Batch conservatively so a
+      // collection of individually valid embeds cannot exceed the message limit.
+      const embedCharacterLength = (embed: EmbedBuilder): number => {
+        const data = embed.toJSON();
+        return [
+          data.title,
+          data.description,
+          data.footer?.text,
+          data.author?.name,
+          ...(data.fields ?? []).flatMap((field) => [field.name, field.value]),
+        ]
+          .filter((value): value is string => typeof value === "string")
+          .reduce((total, value) => total + value.length, 0);
+      };
+
+      const pages: EmbedBuilder[][] = [];
+      let page: EmbedBuilder[] = [];
+      let pageLength = 0;
+
+      for (const embed of embeds) {
+        const length = embedCharacterLength(embed);
+        const wouldExceed = page.length > 0 && (page.length >= 10 || pageLength + length > 5500);
+        if (wouldExceed) {
+          pages.push(page);
+          page = [];
+          pageLength = 0;
+        }
+        page.push(embed);
+        pageLength += length;
+      }
+      if (page.length > 0) pages.push(page);
+
+      for (let pageIndex = 0; pageIndex < pages.length; pageIndex += 1) {
+        const pageEmbeds = pages[pageIndex];
+        if (pageIndex === 0) {
+          await interaction.editReply({ embeds: pageEmbeds });
+        } else {
+          await interaction.followUp({ embeds: pageEmbeds, flags: MessageFlags.Ephemeral });
+        }
       }
     } catch (error) {
       console.error("Failed to read inventory availability:", error);
@@ -1544,6 +1691,123 @@ client.on(Events.InteractionCreate, async (interaction) => {
     }
     pendingInventorySelections.delete(inventoryId);
     await interaction.update({ content: "", embeds: [inventorySearchEmbed(cached.row)], components: [] });
+    return;
+  }
+
+  if (interaction.isChatInputCommand() && interaction.commandName === "sale-manage") {
+    const saleId = interaction.options.getString("sale_id", true).trim().toUpperCase();
+    try {
+      const record = await findSaleForManagement(saleId);
+      if (!record) {
+        await interaction.reply({ content: "Sale **" + saleId + "** was not found.", flags: MessageFlags.Ephemeral });
+      } else {
+        const buttons = new ActionRowBuilder<ButtonBuilder>().addComponents(
+          new ButtonBuilder().setCustomId("sale-manage:edit:" + saleId).setLabel("Edit Sale").setStyle(ButtonStyle.Primary).setDisabled(record.voided),
+          new ButtonBuilder().setCustomId("sale-manage:rollback:" + saleId).setLabel("Rollback Sale").setStyle(ButtonStyle.Danger).setDisabled(record.voided),
+        );
+        await interaction.reply({
+          embeds: [saleManagementEmbed(record)],
+          components: [buttons],
+          flags: MessageFlags.Ephemeral,
+        });
+      }
+    } catch (error) {
+      console.error("Failed to load sale for management:", error);
+      await interaction.reply({ content: "I couldn't load that sale. " + (error instanceof Error ? error.message : "Check the bot logs."), flags: MessageFlags.Ephemeral });
+    }
+    return;
+  }
+
+  if (interaction.isButton() && interaction.customId.startsWith("sale-manage:edit:")) {
+    const saleId = interaction.customId.slice("sale-manage:edit:".length);
+    try {
+      const record = await findSaleForManagement(saleId);
+      if (!record) {
+        await interaction.update({ content: "Sale **" + saleId + "** was not found.", embeds: [], components: [] });
+      } else if (record.voided) {
+        await interaction.reply({ content: "That sale is already voided.", flags: MessageFlags.Ephemeral });
+      } else {
+        await interaction.showModal(buildSaleManageEditModal(record));
+      }
+    } catch (error) {
+      await interaction.reply({ content: "I couldn't open that sale for editing. " + (error instanceof Error ? error.message : "Check the bot logs."), flags: MessageFlags.Ephemeral });
+    }
+    return;
+  }
+
+  if (interaction.isButton() && interaction.customId.startsWith("sale-manage:rollback:")) {
+    const saleId = interaction.customId.slice("sale-manage:rollback:".length);
+    const confirm = new ActionRowBuilder<ButtonBuilder>().addComponents(
+      new ButtonBuilder().setCustomId("sale-manage:rollback-confirm:" + saleId).setLabel("Confirm Rollback").setStyle(ButtonStyle.Danger),
+      new ButtonBuilder().setCustomId("sale-manage:rollback-cancel:" + saleId).setLabel("Cancel").setStyle(ButtonStyle.Secondary),
+    );
+    await interaction.update({
+      content: "Rollback **" + saleId + "**? This will void the sale and restore its inventory allocation. The sale row will remain in the workbook as an audit record.",
+      components: [confirm],
+    });
+    return;
+  }
+
+  if (interaction.isButton() && interaction.customId.startsWith("sale-manage:rollback-cancel:")) {
+    const saleId = interaction.customId.slice("sale-manage:rollback-cancel:".length);
+    const record = await findSaleForManagement(saleId);
+    if (!record) {
+      await interaction.update({ content: "Sale **" + saleId + "** was not found.", components: [] });
+    } else {
+      const buttons = new ActionRowBuilder<ButtonBuilder>().addComponents(
+        new ButtonBuilder().setCustomId("sale-manage:edit:" + saleId).setLabel("Edit Sale").setStyle(ButtonStyle.Primary).setDisabled(record.voided),
+        new ButtonBuilder().setCustomId("sale-manage:rollback:" + saleId).setLabel("Rollback Sale").setStyle(ButtonStyle.Danger).setDisabled(record.voided),
+      );
+      await interaction.update({ content: "", embeds: [saleManagementEmbed(record)], components: [buttons] });
+    }
+    return;
+  }
+
+  if (interaction.isButton() && interaction.customId.startsWith("sale-manage:rollback-confirm:")) {
+    const saleId = interaction.customId.slice("sale-manage:rollback-confirm:".length).trim();
+    try {
+      await withSalePersistenceLock(async () => {
+        if (useGoogleSheets) await rollbackSaleInGoogleSheets(saleId);
+        else rollbackSaleInWorkbook(workbookPath!, saleId);
+      });
+      const updated = await findSaleForManagement(saleId);
+      await interaction.update({
+        content: "Sale **" + saleId + "** was rolled back. Inventory allocation restored.",
+        embeds: updated ? [saleManagementEmbed(updated)] : [],
+        components: [],
+      });
+    } catch (error) {
+      console.error("Failed to rollback sale:", error);
+      await interaction.update({ content: "Rollback failed for **" + saleId + "**. " + (error instanceof Error ? error.message : "Check the bot logs."), components: [] });
+    }
+    return;
+  }
+
+  if (interaction.isModalSubmit() && interaction.customId.startsWith("sale-manage:edit:")) {
+    const saleId = interaction.customId.slice("sale-manage:edit:".length);
+    try {
+      await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+      const sellPrice = Number(interaction.fields.getTextInputValue("sale-manage-price").trim().replace(/[,₱$]/g, ""));
+      const dateSold = interaction.fields.getTextInputValue("sale-manage-date").trim();
+      const notes = interaction.fields.getTextInputValue("sale-manage-notes").trim();
+      const input = { saleId, sellPrice, dateSold, notes };
+      validateSaleEdit(input);
+      await withSalePersistenceLock(async () => {
+        if (useGoogleSheets) await editSaleInGoogleSheets(input);
+        else editSaleInWorkbook(workbookPath!, input);
+      });
+      const updated = await findSaleForManagement(saleId);
+      await interaction.editReply({
+        content: "Sale **" + saleId + "** was updated.",
+        embeds: updated ? [saleManagementEmbed(updated)] : [],
+        components: [],
+      });
+    } catch (error) {
+      console.error("Failed to edit sale:", error);
+      const message = "Sale edit failed. " + (error instanceof Error ? error.message : "Check the bot logs.");
+      if (interaction.deferred || interaction.replied) await interaction.editReply({ content: message, components: [] });
+      else await interaction.reply({ content: message, flags: MessageFlags.Ephemeral });
+    }
     return;
   }
 

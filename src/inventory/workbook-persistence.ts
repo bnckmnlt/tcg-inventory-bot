@@ -473,6 +473,189 @@ export function persistSaleToWorkbook(workbookPath: string, input: LocalSalePers
   }
 }
 
+function replaceXmlCellValue(xml: string, cellRef: string, value: string | number | undefined): string {
+  const pattern = new RegExp('<c\\\\b([^>]*\\\\br="' + cellRef + '"[^>]*)>([\\\\s\\\\S]*?)</c>');
+  return xml.replace(pattern, (_full, attrs: string) => cell(cellRef, attrs.match(/\bs="(\d+)"/)?.[1], value));
+}
+
+function replaceXmlFormulaCachedValue(xml: string, cellRef: string, value: number | string): string {
+  const pattern = new RegExp('(<c\\\\b[^>]*\\\\br="' + cellRef + '"[^>]*>)([\\\\s\\\\S]*?)(</c>)');
+  return xml.replace(pattern, (_full, open: string, body: string, close: string) => {
+    if (!/<f[ >]/.test(body)) return _full;
+    const withoutValue = body.replace(new RegExp("<v[^>]*>[\\\\s\\\\S]*?</v>"), "");
+    return open + withoutValue + "<v>" + xmlEscape(String(value)) + "</v>" + close;
+  });
+}
+
+function findSheetRowByColumnValue(xml: string, column: string, value: string): number {
+  for (const match of xml.matchAll(new RegExp('<row\\b[^>]*\\br="(\\d+)"[^>]*>[\\s\\S]*?</row>', "g"))) {
+    const rowNumber = Number(match[1]);
+    const rowXml = match[0];
+    const cellMatch = rowXml.match(new RegExp(String.raw`<c\\b[^>]*\\br="${column}${rowNumber}"[^>]*>[\\s\\S]*?</c>`));
+    if (!cellMatch) continue;
+    const body = cellMatch[0];
+    const inline = body.match(new RegExp("<t[^>]*>([\\\\s\\\\S]*?)</t>"))?.[1];
+    const raw = body.match(new RegExp("<v[^>]*>([\\\\s\\\\S]*?)</v>"))?.[1];
+    const normalized = xmlEscape(value);
+    if (inline === normalized || raw === value) return rowNumber;
+    const decoded = inline?.replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&apos;/g, "'");
+    if (decoded === value) return rowNumber;
+  }
+  return 0;
+}
+
+export interface SaleEditPersistenceInput {
+  saleId: string;
+  sellPrice: number;
+  dateSold: string;
+  notes?: string;
+}
+
+export function editSaleInWorkbook(workbookPath: string, input: SaleEditPersistenceInput): void {
+  if (!existsSync(workbookPath)) throw new Error("Workbook not found: " + workbookPath);
+  if (!Number.isFinite(input.sellPrice) || input.sellPrice < 0) throw new Error("Sell price must be a non-negative number.");
+  const normalizedDateSold = input.dateSold.trim().replace(/\//g, "-");
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(normalizedDateSold)) throw new Error("Date sold must use YYYY-MM-DD.");
+
+  const tempRoot = mkdtempSync(join(tmpdir(), "tcg-inventory-sale-edit-"));
+  const unpacked = join(tempRoot, "xlsx");
+  new AdmZip(workbookPath).extractAllTo(unpacked, true);
+  try {
+    const salesPath = join(unpacked, "xl", "worksheets", "sheet4.xml");
+    const allocationPath = join(unpacked, "xl", "worksheets", "sheet5.xml");
+    let salesXml = readFileSync(salesPath, "utf8");
+    let allocationXml = readFileSync(allocationPath, "utf8");
+    const saleRow = findSheetRowByColumnValue(salesXml, "A", input.saleId);
+    if (!saleRow) throw new Error("Sale " + input.saleId + " was not found.");
+    if (salesXml.includes("[VOIDED]")) {
+      const saleRowXml = salesXml.match(new RegExp(String.raw`<row\b[^>]*\br="${saleRow}"[^>]*>[\s\S]*?</row>`))?.[0] ?? "";
+      if (saleRowXml.includes("[VOIDED]")) throw new Error("Sale " + input.saleId + " is voided and cannot be edited.");
+    }
+    salesXml = replaceXmlCellValue(salesXml, "K" + saleRow, excelSerialDate(normalizedDateSold));
+    salesXml = replaceXmlCellValue(salesXml, "M" + saleRow, input.sellPrice);
+    salesXml = replaceXmlCellValue(salesXml, "Q" + saleRow, input.notes || "");
+
+    const allocationRows = [...allocationXml.matchAll(new RegExp('<row\\b[^>]*\\br="(\\d+)"[^>]*>[\\s\\S]*?</row>', "g"))]
+      .filter((match) => match[0].includes("<c") && new RegExp(String.raw`<c\b[^>]*\br="B${match[1]}"[^>]*>[\s\S]*?</c>`).test(match[0]) && match[0].includes(input.saleId));
+    const inventory = readV2InventoryWorkbook(workbookPath);
+    let totalAllocationCost = 0;
+    let editedQty = 0;
+    for (const match of allocationRows) {
+      const row = Number(match[1]);
+      const qty = Number((match[0].match(new RegExp(String.raw`<c\b[^>]*\br="E${row}"[^>]*>[\s\S]*?<v>([\s\S]*?)</v>`))?.[1] ?? "0"));
+      const allocationRevenue = qty * input.sellPrice;
+      const allocationCost = Number((match[0].match(new RegExp(String.raw`<c\b[^>]*\br="G${row}"[^>]*>[\s\S]*?<v>([\s\S]*?)</v>`))?.[1] ?? "0"));
+      editedQty += qty;
+      totalAllocationCost += Number.isFinite(allocationCost) ? allocationCost : 0;
+      allocationXml = replaceXmlCellValue(allocationXml, "H" + row, allocationRevenue);
+      allocationXml = replaceXmlCellValue(allocationXml, "I" + row, allocationRevenue - allocationCost);
+    }
+
+    const editedRevenue = editedQty * input.sellPrice;
+    salesXml = replaceXmlFormulaCachedValue(salesXml, "N" + saleRow, editedRevenue);
+    salesXml = replaceXmlFormulaCachedValue(salesXml, "O" + saleRow, totalAllocationCost);
+    salesXml = replaceXmlFormulaCachedValue(salesXml, "P" + saleRow, editedRevenue - totalAllocationCost);
+    salesXml = replaceXmlFormulaCachedValue(salesXml, "R" + saleRow, "OK");
+    for (const match of allocationRows) {
+      const row = Number(match[1]);
+      allocationXml = replaceXmlFormulaCachedValue(allocationXml, "L" + row, "OK");
+    }
+    writeFileSync(salesPath, salesXml);
+    writeFileSync(allocationPath, allocationXml);
+    // Preserve formula caches for Sales Log and Cost Allocations; only their input values changed.
+    // Formula caches for Inventory are updated below.
+    // Editing price/date does not change inventory quantities, so preserve the
+    // current parsed availability values.
+    const inventoryPath = join(unpacked, "xl", "worksheets", "sheet3.xml");
+    let inventoryXml = readFileSync(inventoryPath, "utf8");
+    for (const lot of inventory.rows) {
+      const remaining = lot.remainingQty;
+      const qtySold = Math.max(0, lot.qtyPurchased - remaining);
+      const status = remaining === 0 ? "Sold Out" : remaining < lot.qtyPurchased ? "Partially Sold" : "In Stock";
+      inventoryXml = replaceXmlFormulaCachedValue(inventoryXml, "R" + lot.sourceRow, qtySold);
+      inventoryXml = replaceXmlFormulaCachedValue(inventoryXml, "S" + lot.sourceRow, remaining);
+      inventoryXml = replaceXmlFormulaCachedValue(inventoryXml, "W" + lot.sourceRow, status);
+    }
+    writeFileSync(inventoryPath, inventoryXml);
+    const output = workbookPath + ".tmp-" + process.pid + "-" + Date.now();
+    packDirectory(unpacked, output);
+    renameSync(output, workbookPath);
+  } finally {
+    rmSync(tempRoot, { recursive: true, force: true });
+  }
+}
+
+export function rollbackSaleInWorkbook(workbookPath: string, saleId: string): void {
+  if (!existsSync(workbookPath)) throw new Error("Workbook not found: " + workbookPath);
+  const tempRoot = mkdtempSync(join(tmpdir(), "tcg-inventory-sale-rollback-"));
+  const unpacked = join(tempRoot, "xlsx");
+  new AdmZip(workbookPath).extractAllTo(unpacked, true);
+  try {
+    const salesPath = join(unpacked, "xl", "worksheets", "sheet4.xml");
+    const allocationPath = join(unpacked, "xl", "worksheets", "sheet5.xml");
+    const inventoryPath = join(unpacked, "xl", "worksheets", "sheet3.xml");
+    let salesXml = readFileSync(salesPath, "utf8");
+    let allocationXml = readFileSync(allocationPath, "utf8");
+    let inventoryXml = readFileSync(inventoryPath, "utf8");
+    const saleRow = findSheetRowByColumnValue(salesXml, "A", saleId);
+    if (!saleRow) throw new Error("Sale " + saleId + " was not found.");
+    const saleRowXml = salesXml.match(new RegExp(String.raw`<row\b[^>]*\br="${saleRow}"[^>]*>[\s\S]*?</row>`))?.[0] ?? "";
+    if (saleRowXml.includes("[VOIDED]")) throw new Error("Sale " + saleId + " is already voided.");
+
+    const originalQty = Number((saleRowXml.match(new RegExp(String.raw`<c\b[^>]*\br="L${saleRow}"[^>]*>[\s\S]*?<v>([\s\S]*?)</v>`))?.[1] ?? "0"));
+    const originalPrice = Number((saleRowXml.match(new RegExp(String.raw`<c\b[^>]*\br="M${saleRow}"[^>]*>[\s\S]*?<v>([\s\S]*?)</v>`))?.[1] ?? "0"));
+    const allocationMatches = [...allocationXml.matchAll(new RegExp('<row\\b[^>]*\\br="(\\d+)"[^>]*>[\\s\\S]*?</row>', "g"))]
+      .filter((match) => match[0].includes(saleId));
+
+    const inventory = readV2InventoryWorkbook(workbookPath);
+    for (const match of allocationMatches) {
+      const row = Number(match[1]);
+      const inventoryId = match[0].match(new RegExp(String.raw`<c\b[^>]*\br="C${row}"[^>]*>[\s\S]*?<t[^>]*>([\s\S]*?)</t>`))?.[1]?.replace(/&amp;/g, "&") ?? "";
+      const qty = Number((match[0].match(new RegExp(String.raw`<c\b[^>]*\br="E${row}"[^>]*>[\s\S]*?<v>([\s\S]*?)</v>`))?.[1] ?? "0"));
+      if (inventoryId && qty > 0) {
+        const lot = inventory.rows.find((candidate) => candidate.inventoryId === inventoryId);
+        if (lot) {
+          const remaining = Math.min(lot.qtyPurchased, lot.remainingQty + qty);
+          const qtySold = lot.qtyPurchased - remaining;
+          const status = remaining === lot.qtyPurchased ? "In Stock" : remaining === 0 ? "Sold Out" : "Partially Sold";
+          inventoryXml = replaceXmlFormulaCachedValue(inventoryXml, "R" + lot.sourceRow, qtySold);
+          inventoryXml = replaceXmlFormulaCachedValue(inventoryXml, "S" + lot.sourceRow, remaining);
+          inventoryXml = replaceXmlFormulaCachedValue(inventoryXml, "W" + lot.sourceRow, status);
+        }
+      }
+      allocationXml = replaceXmlCellValue(allocationXml, "E" + row, 0);
+      allocationXml = replaceXmlCellValue(allocationXml, "G" + row, 0);
+      allocationXml = replaceXmlCellValue(allocationXml, "H" + row, 0);
+      allocationXml = replaceXmlCellValue(allocationXml, "I" + row, 0);
+      allocationXml = replaceXmlCellValue(allocationXml, "J" + row, "VOIDED — original qty " + qty + " @ ₱" + originalPrice.toFixed(2));
+    }
+
+    const existingNotes = saleRowXml.match(new RegExp(String.raw`<c\b[^>]*\br="Q${saleRow}"[^>]*>[\s\S]*?<t[^>]*>([\s\S]*?)</t>`))?.[1]?.replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">") ?? "";
+    const voidNote = "[VOIDED] " + (existingNotes ? existingNotes + " | " : "") + "Original quantity: " + originalQty + ". Original sell price: ₱" + originalPrice.toFixed(2) + ".";
+    salesXml = replaceXmlCellValue(salesXml, "L" + saleRow, 0);
+    salesXml = replaceXmlCellValue(salesXml, "Q" + saleRow, voidNote);
+
+    // Keep the existing formula cells intact. Their cached values are updated explicitly
+    // for the affected sale/allocation so the bot can read the workbook immediately.
+    salesXml = replaceXmlFormulaCachedValue(salesXml, "N" + saleRow, 0);
+    salesXml = replaceXmlFormulaCachedValue(salesXml, "O" + saleRow, 0);
+    salesXml = replaceXmlFormulaCachedValue(salesXml, "P" + saleRow, 0);
+    salesXml = replaceXmlFormulaCachedValue(salesXml, "R" + saleRow, "OK");
+    for (const match of allocationMatches) {
+      const row = Number(match[1]);
+      allocationXml = replaceXmlFormulaCachedValue(allocationXml, "L" + row, "OK");
+    }
+    writeFileSync(salesPath, salesXml);
+    writeFileSync(allocationPath, allocationXml);
+    writeFileSync(inventoryPath, inventoryXml);
+    const output = workbookPath + ".tmp-" + process.pid + "-" + Date.now();
+    packDirectory(unpacked, output);
+    renameSync(output, workbookPath);
+  } finally {
+    rmSync(tempRoot, { recursive: true, force: true });
+  }
+}
+
 export function appendInventoryRowsToWorkbook(
   sourceWorkbookPath: string,
   outputWorkbookPath: string,

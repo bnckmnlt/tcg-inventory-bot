@@ -379,6 +379,113 @@ export async function readGoogleSheetInventoryRows(): Promise<ParsedV2InventoryR
   return parsed.rows;
 }
 
+export interface GoogleSaleEditInput {
+  saleId: string;
+  sellPrice: number;
+  dateSold: string;
+  notes?: string;
+}
+
+async function readSalesAndAllocationsForMutation(token: string, spreadsheetId: string): Promise<{ sales: unknown[][]; allocations: unknown[][] }> {
+  const ranges = [quotedSheetRange("Sales Log", "A4:R5000"), quotedSheetRange("Cost Allocations", "A4:L5000")];
+  const query = ranges.map((item) => "ranges=" + encodeURIComponent(item)).join("&");
+  const url = "https://sheets.googleapis.com/v4/spreadsheets/" + encodeURIComponent(spreadsheetId) + "/values:batchGet?" + query + "&valueRenderOption=FORMATTED_VALUE";
+  const body = await sheetsRequest<{ valueRanges?: Array<{ values?: unknown[][] }> }>(token, url);
+  return {
+    sales: body.valueRanges?.[0]?.values ?? [],
+    allocations: body.valueRanges?.[1]?.values ?? [],
+  };
+}
+
+export async function editSaleInGoogleSheets(input: GoogleSaleEditInput): Promise<void> {
+  if (!Number.isFinite(input.sellPrice) || input.sellPrice < 0) throw new Error("Sell price must be a non-negative number.");
+  const normalizedDateSold = input.dateSold.trim().replace(/\//g, "-");
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(normalizedDateSold)) throw new Error("Date sold must use YYYY-MM-DD.");
+
+  const config = loadConfig();
+  const token = await getAccessToken(config.credentials);
+  const { sales, allocations } = await readSalesAndAllocationsForMutation(token, config.spreadsheetId);
+  const saleIndex = sales.findIndex((row) => String(row[0] ?? "").trim() === input.saleId);
+  if (saleIndex < 0) throw new Error("Sale " + input.saleId + " was not found.");
+  const sale = sales[saleIndex];
+  const existingNotes = String(sale[16] ?? "");
+  if (existingNotes.includes("[VOIDED]")) throw new Error("Sale " + input.saleId + " is voided and cannot be edited.");
+
+  const salesRow = saleIndex + 4;
+  const data: Array<{ range: string; majorDimension: string; values: unknown[][] }> = [
+    { range: quotedSheetRange("Sales Log", "K" + salesRow), majorDimension: "ROWS", values: [[normalizedDateSold]] },
+    { range: quotedSheetRange("Sales Log", "M" + salesRow), majorDimension: "ROWS", values: [[input.sellPrice]] },
+    { range: quotedSheetRange("Sales Log", "Q" + salesRow), majorDimension: "ROWS", values: [[input.notes || ""]] },
+  ];
+
+  for (let index = 0; index < allocations.length; index += 1) {
+    const row = allocations[index];
+    if (String(row[1] ?? "").trim() !== input.saleId) continue;
+    const allocationRow = index + 4;
+    const qty = Number(String(row[4] ?? "").replace(/[,₱]/g, "")) || 0;
+    const cost = Number(String(row[6] ?? "").replace(/[,₱]/g, "")) || 0;
+    data.push({
+      range: quotedSheetRange("Cost Allocations", "H" + allocationRow + ":I" + allocationRow),
+      majorDimension: "ROWS",
+      values: [[qty * input.sellPrice, qty * input.sellPrice - cost]],
+    });
+  }
+
+  if (process.env.GOOGLE_SHEETS_BACKUP_ON_WRITE === "true") {
+    await backupGoogleSheetTab(token, config.spreadsheetId, "Sales Log");
+    await backupGoogleSheetTab(token, config.spreadsheetId, "Cost Allocations");
+  }
+
+  const writeUrl = "https://sheets.googleapis.com/v4/spreadsheets/" + encodeURIComponent(config.spreadsheetId) + "/values:batchUpdate";
+  await sheetsRequest(token, writeUrl, {
+    method: "POST",
+    body: JSON.stringify({ valueInputOption: "USER_ENTERED", data }),
+  });
+}
+
+export async function rollbackSaleInGoogleSheets(saleId: string): Promise<void> {
+  const config = loadConfig();
+  const token = await getAccessToken(config.credentials);
+  const { sales, allocations } = await readSalesAndAllocationsForMutation(token, config.spreadsheetId);
+  const saleIndex = sales.findIndex((row) => String(row[0] ?? "").trim() === saleId);
+  if (saleIndex < 0) throw new Error("Sale " + saleId + " was not found.");
+
+  const sale = sales[saleIndex];
+  const existingNotes = String(sale[16] ?? "");
+  if (existingNotes.includes("[VOIDED]")) throw new Error("Sale " + saleId + " is already voided.");
+  const originalQty = Number(String(sale[11] ?? "").replace(/[,₱]/g, "")) || 0;
+  const originalPrice = Number(String(sale[12] ?? "").replace(/[,₱]/g, "")) || 0;
+
+  const data: Array<{ range: string; majorDimension: string; values: unknown[][] }> = [{
+    range: quotedSheetRange("Sales Log", "L" + (saleIndex + 4) + ":Q" + (saleIndex + 4)),
+    majorDimension: "ROWS",
+    values: [[0, originalPrice, `=IF(A${saleIndex + 4}="","",L${saleIndex + 4}*M${saleIndex + 4})`, `=IF(A${saleIndex + 4}="","",SUMIFS('Cost Allocations'!$G$4:$G$5000,'Cost Allocations'!$B$4:$B$5000,A${saleIndex + 4}))`, `=IF(A${saleIndex + 4}="","",N${saleIndex + 4}-O${saleIndex + 4})`, "[VOIDED] Original quantity: " + originalQty + ". Original sell price: ₱" + originalPrice.toFixed(2) + "."]],
+  }];
+
+  for (let index = 0; index < allocations.length; index += 1) {
+    const row = allocations[index];
+    if (String(row[1] ?? "").trim() !== saleId) continue;
+    const allocationRow = index + 4;
+    const qty = Number(String(row[4] ?? "").replace(/[,₱]/g, "")) || 0;
+    data.push({
+      range: quotedSheetRange("Cost Allocations", "E" + allocationRow + ":J" + allocationRow),
+      majorDimension: "ROWS",
+      values: [[0, row[5] ?? "", 0, 0, 0, "VOIDED — original qty " + qty + " @ ₱" + originalPrice.toFixed(2)]],
+    });
+  }
+
+  if (process.env.GOOGLE_SHEETS_BACKUP_ON_WRITE === "true") {
+    await backupGoogleSheetTab(token, config.spreadsheetId, "Sales Log");
+    await backupGoogleSheetTab(token, config.spreadsheetId, "Cost Allocations");
+  }
+
+  const writeUrl = "https://sheets.googleapis.com/v4/spreadsheets/" + encodeURIComponent(config.spreadsheetId) + "/values:batchUpdate";
+  await sheetsRequest(token, writeUrl, {
+    method: "POST",
+    body: JSON.stringify({ valueInputOption: "USER_ENTERED", data }),
+  });
+}
+
 export async function appendInventoryRowsDirectToGoogleSheets(
   rows: V2InventoryRow[],
 ): Promise<{ inserted: number; skipped: number }> {
@@ -404,6 +511,9 @@ export interface GoogleSaleWriteInput {
 }
 
 export interface GoogleBriefingSaleRecord {
+  saleId?: string;
+  notes?: string;
+  sellPrice?: number;
   cardKey: string;
   inventoryId: string;
   cardName: string;
@@ -423,8 +533,11 @@ export interface GoogleBriefingSaleRecord {
 export async function readGoogleSheetSalesLog(): Promise<GoogleBriefingSaleRecord[]> {
   const config = loadConfig();
   const token = await getAccessToken(config.credentials);
-  const [sales] = await readBatchValues(token, config.spreadsheetId, [quotedSheetRange("Sales Log", "A4:P5000")]);
+  const [sales] = await readBatchValues(token, config.spreadsheetId, [quotedSheetRange("Sales Log", "A4:R5000")]);
   return (sales?.values ?? []).filter((row) => String(row[0] ?? "").trim()).map((row) => ({
+    saleId: String(row[0] ?? "").trim() || undefined,
+    notes: String(row[16] ?? "").trim() || undefined,
+    sellPrice: Number(String(row[12] ?? "").replace(/[,₱]/g, "")) || 0,
     cardKey: String(row[1] ?? "").trim(),
     inventoryId: String(row[2] ?? "").trim(),
     cardName: String(row[3] ?? "").trim(),

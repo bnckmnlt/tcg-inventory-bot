@@ -13,7 +13,7 @@ export interface InventoryAvailabilityRecord {
   status: InventoryAvailabilityStatus;
   startDate?: string;
   endDate?: string;
-  dateBasis: "PURCHASE_DATE" | "LAST_SALE_DATE" | "OPEN_START" | "OPEN_END" | "NO_DATE";
+  dateBasis: "PURCHASE_DATE" | "LAST_SALE_DATE" | "ROW_RANGE" | "OPEN_START" | "OPEN_END" | "NO_DATE";
 }
 
 export interface InventoryAvailabilityResult {
@@ -62,14 +62,46 @@ export function findInventoryAvailability(
 ): InventoryAvailabilityResult {
   const result: InventoryAvailabilityResult = { from, to, inStock: [], soldOut: [], undated: [] };
 
-  for (const row of rows) {
+  // Some inventory imports have a date on the first row of a group and then
+  // blank dates until the next dated row. Treat those blank rows as belonging
+  // to the interval between the nearest dated rows. This deliberately does
+  // not extend beyond the last dated row, so trailing undated records are not
+  // pulled into a date-range query.
+  const previousDatedRow: Array<string | undefined> = [];
+  const nextDatedRow: Array<string | undefined> = [];
+  let previousDate: string | undefined;
+  for (let index = 0; index < rows.length; index += 1) {
+    previousDatedRow[index] = previousDate;
+    const date = normalizeDate(rows[index].purchaseDate);
+    if (date) previousDate = date;
+  }
+  let nextDate: string | undefined;
+  for (let index = rows.length - 1; index >= 0; index -= 1) {
+    nextDatedRow[index] = nextDate;
+    const date = normalizeDate(rows[index].purchaseDate);
+    if (date) nextDate = date;
+  }
+
+  for (let index = 0; index < rows.length; index += 1) {
+    const row = rows[index];
     const purchaseDate = normalizeDate(row.purchaseDate);
     const lastSaleDate = lastSaleDateForInventory(row.inventoryId, sales);
+    const surroundingStart = previousDatedRow[index];
+    const surroundingEnd = nextDatedRow[index];
+    const rowRangeAvailable = !purchaseDate && Boolean(surroundingStart && surroundingEnd);
 
     // A purchase date establishes when the lot could first be available.
     // Only a lot that is actually sold out can use its latest sale date as the
     // end boundary. Partial sales do not turn a stock lot into SOLD OUT.
     if (purchaseDate && purchaseDate > to) continue;
+    if (!purchaseDate && !rowRangeAvailable && !lastSaleDate) {
+      result.undated.push({
+        row,
+        status: "UNDATED",
+        dateBasis: "NO_DATE",
+      });
+      continue;
+    }
 
     if (row.remainingQty > 0) {
       if (purchaseDate) {
@@ -78,6 +110,14 @@ export function findInventoryAvailability(
           status: "IN_STOCK",
           startDate: purchaseDate,
           dateBasis: "PURCHASE_DATE",
+        });
+      } else if (surroundingStart && surroundingEnd && surroundingStart <= to && surroundingEnd >= from) {
+        result.inStock.push({
+          row,
+          status: "IN_STOCK",
+          startDate: surroundingStart,
+          endDate: surroundingEnd,
+          dateBasis: "ROW_RANGE",
         });
       } else {
         result.undated.push({
@@ -112,8 +152,21 @@ export function findInventoryAvailability(
       continue;
     }
 
+    // A blank-date sold-out row can use its surrounding dated row interval,
+    // but only when it is actually between two dated rows. A trailing blank
+    // section remains undated rather than being assigned a guessed date.
+    if (!purchaseDate && surroundingStart && surroundingEnd && surroundingStart <= to && surroundingEnd >= from) {
+      result.soldOut.push({
+        row,
+        status: "SOLD_OUT",
+        startDate: surroundingStart,
+        endDate: surroundingEnd,
+        dateBasis: "ROW_RANGE",
+      });
+      continue;
+    }
+
     // No recorded sale date means a sold-out lot has no reliable end boundary.
-    // Keep it visible without guessing when the sold-out state applied.
     result.undated.push({
       row,
       status: "UNDATED",

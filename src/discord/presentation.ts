@@ -144,6 +144,48 @@ export function selectedInventoryEmbed(row: ParsedV2InventoryRow): EmbedBuilder 
     .setFooter({ text: "Quantity and sell price will be entered next." }), DISCORD_ICONS.receipt);
 }
 
+export function saleManagementEmbed(record: {
+  saleId: string;
+  cardName: string;
+  setSeries: string;
+  cardNumber: string;
+  rarity?: string;
+  variantPrinting: string;
+  condition: string;
+  language: string;
+  inventoryId: string;
+  dateSold?: string;
+  qtySold: number;
+  sellPrice: number;
+  revenue: number;
+  cost: number;
+  profit: number;
+  notes?: string;
+  voided: boolean;
+}): EmbedBuilder {
+  return withIcon(new EmbedBuilder()
+    .setColor(record.voided ? DISCORD_COLORS.danger : DISCORD_COLORS.sales)
+    .setTitle(record.voided ? "Sale — Voided" : "Sale Management")
+    .setDescription([
+      `**${record.cardName} — ${record.cardNumber}**`,
+      `${record.setSeries} • ${record.rarity || "Rarity not set"} • ${record.variantPrinting || "Normal"}`,
+      `${record.condition} • ${record.language}`,
+    ].join("\n"))
+    .addFields(
+      { name: "Sale ID", value: record.saleId, inline: true },
+      { name: "Inventory", value: record.inventoryId, inline: true },
+      { name: "Date Sold", value: record.dateSold || "—", inline: true },
+      { name: "Quantity", value: String(record.qtySold), inline: true },
+      { name: "Sell Price", value: `₱${record.sellPrice.toFixed(2)} each`, inline: true },
+      { name: "Revenue", value: `₱${record.revenue.toFixed(2)}`, inline: true },
+      { name: "Cost", value: `₱${record.cost.toFixed(2)}`, inline: true },
+      { name: "Profit / Loss", value: `₱${record.profit.toFixed(2)}`, inline: true },
+      ...(record.notes ? [{ name: "Notes", value: record.notes.slice(0, 1024), inline: false }] : []),
+    )
+    .setFooter({ text: record.voided ? "This sale is voided. Its inventory allocation has been restored." : "Edit changes price/date/notes. Rollback voids the sale and restores its inventory allocation." }),
+    DISCORD_ICONS.receipt);
+}
+
 export function salePreparationErrorEmbed(message: string): EmbedBuilder {
   return withIcon(new EmbedBuilder()
     .setColor(DISCORD_COLORS.danger)
@@ -223,16 +265,11 @@ function embedCharacterLength(embed: EmbedBuilder): number {
 }
 
 function availabilityRecordValue(record: InventoryAvailabilityEmbedRecord): string {
-  const range = record.startDate || record.endDate
-    ? `Date basis: **${record.startDate ?? "Open start"} → ${record.endDate ?? "Open end"}**`
-    : "Date basis: **No date recorded**";
   return [
-    `Inventory: ${record.inventoryId}`,
-    `Set: ${record.setSeries || "Unknown"}${record.cardNumber ? ` • #${record.cardNumber}` : ""}`,
-    `Details: ${[record.rarity, record.variantPrinting || "Normal", record.condition, record.language].filter(Boolean).join(" • ")}`,
+    `${record.setSeries || "Unknown"}${record.cardNumber ? ` • #${record.cardNumber}` : ""}`,
+    [record.rarity, record.variantPrinting || "Normal", record.condition, record.language].filter(Boolean).join(" • "),
     `Remaining: **${record.remainingQty}**`,
-    range,
-  ].join("\n");
+  ].filter(Boolean).join("\n");
 }
 
 export function inventoryAvailabilitySummaryEmbed(from: string, to: string, counts: { inStock: number; soldOut: number; undated: number }): EmbedBuilder {
@@ -287,9 +324,9 @@ export function inventoryAvailabilityEmbeds(
 
   for (const record of records) {
     const field = {
-      name: `${record.cardName} — ${record.cardNumber || "No #"}`.slice(0, 256),
+      name: record.cardName.slice(0, 256),
       value: availabilityRecordValue(record).slice(0, 1024),
-      inline: false,
+      inline: true,
     };
     const fieldLength = field.name.length + field.value.length;
 

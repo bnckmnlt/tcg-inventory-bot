@@ -1,6 +1,7 @@
 import type { ParsedV2InventoryRow } from "./v2-workbook.js";
 
 export interface BriefingSaleRecord {
+  saleId?: string;
   cardKey: string;
   inventoryId: string;
   cardName: string;
