@@ -10,6 +10,7 @@ export interface BriefingSaleRecord {
   condition: string;
   language: string;
   variantPrinting: string;
+  dateSold?: string;
   qtySold: number;
   revenue: number;
   cost: number;

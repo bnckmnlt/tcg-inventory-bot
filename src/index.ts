@@ -56,6 +56,7 @@ import {
 } from "./transaction.js";
 import { buildSaleCardKey, buildSelectedLotSalePlan, type SaleDraft } from "./inventory/sales.js";
 import { searchInventory } from "./inventory/search.js";
+import { findInventoryAvailability, type InventoryAvailabilitySale } from "./inventory/availability.js";
 import { countInventoryAlerts, getInventoryAlerts } from "./inventory/alerts.js";
 import { buildInventoryBriefing, type BriefingSaleRecord } from "./inventory/briefing.js";
 import {
@@ -72,6 +73,8 @@ import {
   salePreparationErrorEmbed,
   inventoryAlertsEmbeds,
   inventoryAlertsEmptyEmbed,
+  inventoryAvailabilitySummaryEmbed,
+  inventoryAvailabilityEmbeds,
 } from "./discord/presentation.js";
 
 const token = process.env.DISCORD_TOKEN;
@@ -202,6 +205,7 @@ function readLocalSalesLog(workbook: string): BriefingSaleRecord[] {
       condition: String(row[7] ?? "").trim(),
       language: String(row[8] ?? "").trim(),
       variantPrinting: String(row[9] ?? "").trim() || "Normal",
+      dateSold: String(row[10] ?? "").trim() || undefined,
       qtySold: Number(String(row[11] ?? "").replace(/[,₱]/g, "")) || 0,
       revenue: Number(String(row[13] ?? "").replace(/[,₱]/g, "")) || 0,
       cost: Number(String(row[14] ?? "").replace(/[,₱]/g, "")) || 0,
@@ -232,6 +236,10 @@ function inventorySearchButtons() {
 function formatMoney(amount: number | null, currency: string | null): string {
   if (amount === null) return "Unknown";
   return `${currency ?? ""} ${amount.toFixed(2)}`.trim();
+}
+
+function isIsoDate(value: string): boolean {
+  return /^\d{4}-\d{2}-\d{2}$/.test(value) && !Number.isNaN(Date.parse(value + "T00:00:00Z"));
 }
 
 function statusLabel(plan: IngestionPlan): string {
@@ -1009,6 +1017,28 @@ client.once(Events.ClientReady, async (readyClient) => {
     if (existingInventoryAlerts) await existingInventoryAlerts.edit(inventoryAlertsCommand);
     else await readyClient.application.commands.create(inventoryAlertsCommand, guild.id);
 
+    const existingInventoryAvailability = commands.find((command) => command.name === "inventory-availability");
+    const inventoryAvailabilityCommand = {
+      name: "inventory-availability",
+      description: "Show inventory availability for a date range",
+      options: [
+        {
+          type: 3,
+          name: "from",
+          description: "Range start (YYYY-MM-DD)",
+          required: true,
+        },
+        {
+          type: 3,
+          name: "to",
+          description: "Range end (YYYY-MM-DD)",
+          required: true,
+        },
+      ],
+    };
+    if (existingInventoryAvailability) await existingInventoryAvailability.edit(inventoryAvailabilityCommand);
+    else await readyClient.application.commands.create(inventoryAvailabilityCommand, guild.id);
+
     const existingSale = commands.find((command) => command.name === "sale");
     const saleCommand = {
       name: "sale",
@@ -1355,6 +1385,88 @@ client.on(Events.InteractionCreate, async (interaction) => {
     } catch (error) {
       console.error("Failed to read inventory alerts:", error);
       await interaction.editReply({ content: "I couldn't read the Inventory sheet right now." });
+    }
+    return;
+  }
+
+  if (interaction.isChatInputCommand() && interaction.commandName === "inventory-availability") {
+    if (!workbookPath) {
+      await interaction.reply({ content: "Inventory availability is not configured because INVENTORY_WORKBOOK_PATH is missing.", flags: MessageFlags.Ephemeral });
+      return;
+    }
+
+    const from = interaction.options.getString("from", true).trim();
+    const to = interaction.options.getString("to", true).trim();
+
+    if (!isIsoDate(from) || !isIsoDate(to)) {
+      await interaction.reply({
+        content: "Both dates must use **YYYY-MM-DD** format and contain valid calendar dates.",
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
+    if (from > to) {
+      await interaction.reply({
+        content: "The **from** date cannot be later than the **to** date.",
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
+
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    try {
+      const useGoogleSheets = process.env.GOOGLE_SHEETS_SYNC === "true" && !invoiceTestMode;
+      const rows = useGoogleSheets
+        ? await readGoogleSheetInventoryRows()
+        : readV2InventoryWorkbook(workbookPath).rows;
+      const sales = useGoogleSheets
+        ? await readGoogleSheetSalesLog()
+        : readLocalSalesLog(workbookPath);
+
+      const availability = findInventoryAvailability(
+        rows,
+        sales as InventoryAvailabilitySale[],
+        from,
+        to,
+      );
+
+      const toEmbedRecords = (records: typeof availability.inStock) => records.map((record) => ({
+        inventoryId: record.row.inventoryId,
+        cardName: record.row.cardName,
+        setSeries: record.row.setSeries,
+        cardNumber: record.row.cardNumber,
+        rarity: record.row.rarity,
+        variantPrinting: record.row.variantPrinting,
+        condition: record.row.condition,
+        language: record.row.language,
+        remainingQty: record.row.remainingQty,
+        startDate: record.startDate,
+        endDate: record.endDate,
+        dateBasis: record.dateBasis,
+      }));
+
+      const embeds = [
+        inventoryAvailabilitySummaryEmbed(from, to, {
+          inStock: availability.inStock.length,
+          soldOut: availability.soldOut.length,
+          undated: availability.undated.length,
+        }),
+        ...inventoryAvailabilityEmbeds("In Stock", toEmbedRecords(availability.inStock)),
+        ...inventoryAvailabilityEmbeds("Sold Out", toEmbedRecords(availability.soldOut)),
+        ...inventoryAvailabilityEmbeds("Undated / Open Date", toEmbedRecords(availability.undated)),
+      ];
+
+      // Discord accepts at most 10 embeds per message. Keep the initial
+      // interaction response separate and send additional pages as ephemeral
+      // follow-ups when the result is large.
+      for (let start = 0; start < embeds.length; start += 10) {
+        const page = embeds.slice(start, start + 10);
+        if (start === 0) await interaction.editReply({ embeds: page });
+        else await interaction.followUp({ embeds: page, flags: MessageFlags.Ephemeral });
+      }
+    } catch (error) {
+      console.error("Failed to read inventory availability:", error);
+      await interaction.editReply({ content: "I couldn't read inventory availability right now." });
     }
     return;
   }

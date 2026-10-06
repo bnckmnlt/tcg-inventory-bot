@@ -413,6 +413,7 @@ export interface GoogleBriefingSaleRecord {
   condition: string;
   language: string;
   variantPrinting: string;
+  dateSold?: string;
   qtySold: number;
   revenue: number;
   cost: number;
@@ -433,6 +434,7 @@ export async function readGoogleSheetSalesLog(): Promise<GoogleBriefingSaleRecor
     condition: String(row[7] ?? "").trim(),
     language: String(row[8] ?? "").trim(),
     variantPrinting: String(row[9] ?? "").trim() || "Normal",
+    dateSold: String(row[10] ?? "").trim() || undefined,
     qtySold: Number(String(row[11] ?? "").replace(/[,₱]/g, "")) || 0,
     revenue: Number(String(row[13] ?? "").replace(/[,₱]/g, "")) || 0,
     cost: Number(String(row[14] ?? "").replace(/[,₱]/g, "")) || 0,

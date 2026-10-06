@@ -195,3 +195,124 @@ export function inventoryAlertsEmptyEmbed(threshold: number): EmbedBuilder {
       `Low-stock threshold: **${threshold}** remaining unit(s).`,
     ].join("\n")), DISCORD_ICONS.checkCircle);
 }
+
+export interface InventoryAvailabilityEmbedRecord {
+  inventoryId: string;
+  cardName: string;
+  setSeries: string;
+  cardNumber: string;
+  rarity?: string;
+  variantPrinting: string;
+  condition: string;
+  language: string;
+  remainingQty: number;
+  startDate?: string;
+  endDate?: string;
+  dateBasis: string;
+}
+
+function embedCharacterLength(embed: EmbedBuilder): number {
+  const data = embed.toJSON();
+  return [
+    data.title,
+    data.description,
+    data.footer?.text,
+    data.author?.name,
+    ...(data.fields ?? []).flatMap((field) => [field.name, field.value]),
+  ].filter((value): value is string => typeof value === "string").reduce((total, value) => total + value.length, 0);
+}
+
+function availabilityRecordValue(record: InventoryAvailabilityEmbedRecord): string {
+  const range = record.startDate || record.endDate
+    ? `Date basis: **${record.startDate ?? "Open start"} → ${record.endDate ?? "Open end"}**`
+    : "Date basis: **No date recorded**";
+  return [
+    `Inventory: ${record.inventoryId}`,
+    `Set: ${record.setSeries || "Unknown"}${record.cardNumber ? ` • #${record.cardNumber}` : ""}`,
+    `Details: ${[record.rarity, record.variantPrinting || "Normal", record.condition, record.language].filter(Boolean).join(" • ")}`,
+    `Remaining: **${record.remainingQty}**`,
+    range,
+  ].join("\n");
+}
+
+export function inventoryAvailabilitySummaryEmbed(from: string, to: string, counts: { inStock: number; soldOut: number; undated: number }): EmbedBuilder {
+  return withIcon(new EmbedBuilder()
+    .setColor(DISCORD_COLORS.primary)
+    .setTitle("Inventory Availability")
+    .setDescription([
+      `Requested range: **${from} → ${to}**`,
+      "",
+      `**In Stock:** ${counts.inStock}`,
+      `**Sold Out:** ${counts.soldOut}`,
+      `**Undated / Open Date:** ${counts.undated}`,
+      "",
+      "This is a current inventory-status view using purchase dates and recorded sale dates as temporal boundaries.",
+    ].join("\n")), DISCORD_ICONS.magnifyingGlass);
+}
+
+export function inventoryAvailabilityEmbeds(
+  title: "In Stock" | "Sold Out" | "Undated / Open Date",
+  records: InventoryAvailabilityEmbedRecord[],
+): EmbedBuilder[] {
+  if (records.length === 0) return [];
+
+  const icon = title === "In Stock"
+    ? DISCORD_ICONS.checkCircle
+    : title === "Sold Out"
+      ? DISCORD_ICONS.xCircle
+      : DISCORD_ICONS.warningCircle;
+  const color = title === "In Stock"
+    ? DISCORD_COLORS.success
+    : title === "Sold Out"
+      ? DISCORD_COLORS.danger
+      : DISCORD_COLORS.warning;
+
+  const embeds: EmbedBuilder[] = [];
+  const description = title === "Undated / Open Date"
+    ? "These records cannot be placed precisely in the requested range because a purchase date is missing. They are kept separate rather than being assigned an invented date."
+    : title === "Sold Out"
+      ? "These lots were sold out within or overlapping the requested range based on their purchase date and latest recorded sale date."
+      : "These lots were purchased on or before the requested range and still have stock remaining.";
+
+  // Discord's embed limit is 6,000 characters per embed. Build each embed
+  // incrementally so long card/set names cannot push an otherwise valid page
+  // over the limit. Keep a safety margin for the embed metadata.
+  let embed = new EmbedBuilder()
+    .setColor(color)
+    .setTitle(title)
+    .setDescription(description);
+
+  let currentLength = embedCharacterLength(embed);
+  let page = 1;
+
+  for (const record of records) {
+    const field = {
+      name: `${record.cardName} — ${record.cardNumber || "No #"}`.slice(0, 256),
+      value: availabilityRecordValue(record).slice(0, 1024),
+      inline: false,
+    };
+    const fieldLength = field.name.length + field.value.length;
+
+    if (
+      embed.data.fields?.length &&
+      (embed.data.fields.length >= 25 || currentLength + fieldLength > 5000)
+    ) {
+      embeds.push(withIcon(embed, icon));
+      page += 1;
+      embed = new EmbedBuilder()
+        .setColor(color)
+        .setTitle(`${title} — continued${page > 2 ? ` ${page}` : ""}`)
+        .setDescription(description);
+      currentLength = embedCharacterLength(embed);
+    }
+
+    embed.addFields(field);
+    currentLength += fieldLength;
+  }
+
+  if (embed.data.fields?.length) {
+    embeds.push(withIcon(embed, icon));
+  }
+
+  return embeds;
+}
