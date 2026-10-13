@@ -35,7 +35,7 @@ test("aggregates lots by card name and number and separates remaining stock from
   ]);
   assert.equal(
     formatInventoryExport(rows),
-    "IN STOCK\nPikachu 56/162   x6\n\nSOLD OUT\nCharizard 4/102\n",
+    "IN STOCK\nPikachu 56/162  x6\n\nSOLD OUT\nCharizard 4/102\n",
   );
 });
 
@@ -47,7 +47,7 @@ test("filters by inclusive purchase date range and omits quantities from sold-ou
   ];
   assert.equal(
     formatInventoryExport(rows, "2026-01-01", "2026-01-31"),
-    "IN STOCK\nPikachu 56/162   x2\n\nSOLD OUT\nGengar 1/99\n",
+    "IN STOCK\nPikachu 56/162  x2\n\nSOLD OUT\nGengar 1/99\n",
   );
 });
 
@@ -62,7 +62,23 @@ test("includes blank-date rows only when they fall between dated rows overlappin
 
   assert.equal(
     formatInventoryExport(rows, "2026-01-20", "2026-01-31"),
-    "IN STOCK\nGap row 57/162   x6\n\nSOLD OUT\n(none)\n",
+    "IN STOCK\nGap row 57/162  x6\n\nSOLD OUT\n(none)\n",
+  );
+});
+
+test("formats inventory sections in two aligned columns without long names shifting later rows", () => {
+  const rows = [
+    row({ cardName: "A very long card name that needs room", cardNumber: "1/99", remainingQty: 2 }),
+    row({ cardName: "Bulbasaur", cardNumber: "2/99", remainingQty: 4 }),
+    row({ cardName: "Charmander", cardNumber: "3/99", remainingQty: 1 }),
+    row({ cardName: "Ditto", cardNumber: "4/99", remainingQty: 0 }),
+    row({ cardName: "Eevee", cardNumber: "5/99", remainingQty: 0 }),
+    row({ cardName: "Farfetch'd", cardNumber: "6/99", remainingQty: 0 }),
+  ];
+
+  assert.equal(
+    formatInventoryExport(rows),
+    "IN STOCK\nA very long card name that needs room 1/99  x2   Charmander 3/99  x1\nBulbasaur 2/99  x4\n\nSOLD OUT\nDitto 4/99   Farfetch'd 6/99\nEevee 5/99\n",
   );
 });
 

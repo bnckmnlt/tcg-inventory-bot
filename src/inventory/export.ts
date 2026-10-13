@@ -64,25 +64,35 @@ export function formatInventoryExport(
   const entries = buildInventoryExport(filteredRows);
   const inStock = entries.filter((entry) => entry.remaining > 0);
   const sold = entries.filter((entry) => entry.remaining === 0 && entry.purchased > 0);
-  const formatSection = (section: InventoryExportEntry[]) => {
+  const formatSection = (section: InventoryExportEntry[], includeQuantity: boolean) => {
     if (!section.length) return ["(none)"];
-    const labels = section.map((entry) =>
-      `${entry.cardName}${entry.cardNumber ? ` ${entry.cardNumber}` : ""}`
-    );
-    const stockColumn = Math.max(...labels.map((label) => label.length)) + 3;
-    return section.map((entry, index) =>
-      section === sold
-        ? labels[index]
-        : `${labels[index].padEnd(stockColumn)}x${entry.remaining}`
-    );
+
+    const entries = section.map((entry) => {
+      const label = `${entry.cardName}${entry.cardNumber ? ` ${entry.cardNumber}` : ""}`;
+      return includeQuantity ? `${label}  x${entry.remaining}` : label;
+    });
+
+    // Fill down the left column, then the right. Calculate a shared width from
+    // the longest entry so long card names cannot push the next column out of alignment.
+    const splitAt = Math.ceil(entries.length / 2);
+    const left = entries.slice(0, splitAt);
+    const right = entries.slice(splitAt);
+    const columnWidth = Math.max(0, ...left.map((entry) => entry.length)) + 3;
+    const rowCount = Math.max(left.length, right.length);
+
+    return Array.from({ length: rowCount }, (_, index) => {
+      const leftEntry = left[index] ?? "";
+      const rightEntry = right[index] ?? "";
+      return rightEntry ? `${leftEntry.padEnd(columnWidth)}${rightEntry}`.trimEnd() : leftEntry;
+    });
   };
 
   return [
     "IN STOCK",
-    ...formatSection(inStock),
+    ...formatSection(inStock, true),
     "",
     "SOLD OUT",
-    ...formatSection(sold),
+    ...formatSection(sold, false),
     "",
   ].join("\n");
 }
