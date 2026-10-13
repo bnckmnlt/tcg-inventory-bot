@@ -59,6 +59,7 @@ import { validateSaleEdit, type SaleManagementRecord } from "./inventory/sale-ma
 import { searchInventory } from "./inventory/search.js";
 import { findInventoryAvailability, type InventoryAvailabilitySale } from "./inventory/availability.js";
 import { countInventoryAlerts, getInventoryAlerts } from "./inventory/alerts.js";
+import { formatInventoryExport } from "./inventory/export.js";
 import { buildInventoryBriefing, type BriefingSaleRecord } from "./inventory/briefing.js";
 import {
   DISCORD_ICONS,
@@ -1145,6 +1146,14 @@ client.once(Events.ClientReady, async (readyClient) => {
     if (existingInventoryAvailability) await existingInventoryAvailability.edit(inventoryAvailabilityCommand);
     else await readyClient.application.commands.create(inventoryAvailabilityCommand, guild.id);
 
+    const existingInventoryExport = commands.find((command) => command.name === "inventory-export");
+    const inventoryExportCommand = {
+      name: "inventory-export",
+      description: "Download a text file of in-stock and sold-out cards",
+    };
+    if (existingInventoryExport) await existingInventoryExport.edit(inventoryExportCommand);
+    else await readyClient.application.commands.create(inventoryExportCommand, guild.id);
+
     const existingSale = commands.find((command) => command.name === "sale");
     const saleCommand = {
       name: "sale",
@@ -1500,6 +1509,29 @@ client.on(Events.InteractionCreate, async (interaction) => {
     } catch (error) {
       console.error("Failed to read inventory alerts:", error);
       await interaction.editReply({ content: "I couldn't read the Inventory sheet right now." });
+    }
+    return;
+  }
+
+  if (interaction.isChatInputCommand() && interaction.commandName === "inventory-export") {
+    if (!workbookPath) {
+      await interaction.reply({ content: "Inventory export is not configured because INVENTORY_WORKBOOK_PATH is missing.", flags: MessageFlags.Ephemeral });
+      return;
+    }
+
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    try {
+      const rows = process.env.GOOGLE_SHEETS_SYNC === "true" && !invoiceTestMode
+        ? await readGoogleSheetInventoryRows()
+        : readV2InventoryWorkbook(workbookPath).rows;
+      const content = formatInventoryExport(rows);
+      await interaction.editReply({
+        content: "Inventory export generated from the current inventory records.",
+        files: [{ attachment: Buffer.from(content, "utf8"), name: "inventory-export.txt" }],
+      });
+    } catch (error) {
+      console.error("Failed to export inventory:", error);
+      await interaction.editReply({ content: "I couldn't generate the inventory export right now." });
     }
     return;
   }
