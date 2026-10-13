@@ -58,7 +58,10 @@ export function formatInventoryExport(
       }
       const start = previousDatedRow[index];
       const end = nextDatedRow[index];
-      return Boolean(start && end && start <= to && end >= from);
+      // Treat blank-date rows as belonging to the interval after the preceding
+      // dated row. A range starting at the next dated row must not pull in the
+      // preceding interval's blank rows.
+      return Boolean(start && end && start >= from && start <= to && end >= start);
     });
   }
   const entries = buildInventoryExport(filteredRows);

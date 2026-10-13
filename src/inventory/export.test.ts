@@ -51,18 +51,20 @@ test("filters by inclusive purchase date range and omits quantities from sold-ou
   );
 });
 
-test("includes blank-date rows only when they fall between dated rows overlapping the range", () => {
+test("includes blank-date rows with their preceding dated interval, not a later range", () => {
   const rows = [
     row({ cardName: "Leading undated", purchaseDate: undefined }),
-    row({ cardName: "January", purchaseDate: "2026-01-05" }),
-    row({ cardName: "Gap row", purchaseDate: undefined, cardNumber: "57/162" }),
-    row({ cardName: "February", purchaseDate: "2026-02-05" }),
+    row({ cardName: "May record", purchaseDate: "2026-05-23" }),
+    row({ cardName: "May gap row", purchaseDate: undefined, cardNumber: "57/162" }),
+    row({ cardName: "August record", purchaseDate: "2026-08-17" }),
+    row({ cardName: "August gap row", purchaseDate: undefined, cardNumber: "58/162" }),
+    row({ cardName: "September record", purchaseDate: "2026-09-05" }),
     row({ cardName: "Trailing undated", purchaseDate: undefined }),
   ];
 
   assert.equal(
-    formatInventoryExport(rows, "2026-01-20", "2026-01-31"),
-    "IN STOCK\nGap row 57/162  x6\n\nSOLD OUT\n(none)\n",
+    formatInventoryExport(rows, "2026-08-17", "2026-08-31"),
+    "IN STOCK\nAugust gap row 58/162  x6   August record 56/162  x6\n\nSOLD OUT\n(none)\n",
   );
 });
 
