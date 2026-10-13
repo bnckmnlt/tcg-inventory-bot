@@ -51,6 +51,21 @@ test("filters by inclusive purchase date range and omits quantities from sold-ou
   );
 });
 
+test("includes blank-date rows only when they fall between dated rows overlapping the range", () => {
+  const rows = [
+    row({ cardName: "Leading undated", purchaseDate: undefined }),
+    row({ cardName: "January", purchaseDate: "2026-01-05" }),
+    row({ cardName: "Gap row", purchaseDate: undefined, cardNumber: "57/162" }),
+    row({ cardName: "February", purchaseDate: "2026-02-05" }),
+    row({ cardName: "Trailing undated", purchaseDate: undefined }),
+  ];
+
+  assert.equal(
+    formatInventoryExport(rows, "2026-01-20", "2026-01-31"),
+    "IN STOCK\nGap row 57/162   x6\n\nSOLD OUT\n(none)\n",
+  );
+});
+
 test("prints empty sections without failing", () => {
   assert.equal(formatInventoryExport([]), "IN STOCK\n(none)\n\nSOLD OUT\n(none)\n");
 });

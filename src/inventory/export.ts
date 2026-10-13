@@ -29,9 +29,38 @@ export function formatInventoryExport(
   from?: string,
   to?: string,
 ): string {
-  const filteredRows = from && to
-    ? rows.filter((row) => Boolean(row.purchaseDate && row.purchaseDate >= from && row.purchaseDate <= to))
-    : rows;
+  let filteredRows = rows;
+  if (from && to) {
+    // Match inventory-availability's date-gap handling: blank purchase dates
+    // are included only when the row sits between two dated rows whose
+    // interval overlaps the requested range. Leading/trailing undated rows
+    // remain excluded, rather than being assigned a guessed date.
+    const previousDatedRow: Array<string | undefined> = [];
+    const nextDatedRow: Array<string | undefined> = [];
+    let previousDate: string | undefined;
+    for (let index = 0; index < rows.length; index += 1) {
+      previousDatedRow[index] = previousDate;
+      const date = rows[index].purchaseDate?.trim();
+      if (date && /^\d{4}-\d{2}-\d{2}$/.test(date)) previousDate = date;
+    }
+
+    let nextDate: string | undefined;
+    for (let index = rows.length - 1; index >= 0; index -= 1) {
+      nextDatedRow[index] = nextDate;
+      const date = rows[index].purchaseDate?.trim();
+      if (date && /^\d{4}-\d{2}-\d{2}$/.test(date)) nextDate = date;
+    }
+
+    filteredRows = rows.filter((row, index) => {
+      const date = row.purchaseDate?.trim();
+      if (date && /^\d{4}-\d{2}-\d{2}$/.test(date)) {
+        return date >= from && date <= to;
+      }
+      const start = previousDatedRow[index];
+      const end = nextDatedRow[index];
+      return Boolean(start && end && start <= to && end >= from);
+    });
+  }
   const entries = buildInventoryExport(filteredRows);
   const inStock = entries.filter((entry) => entry.remaining > 0);
   const sold = entries.filter((entry) => entry.remaining === 0 && entry.purchased > 0);
