@@ -28,15 +28,23 @@ export function formatInventoryExport(rows: ParsedV2InventoryRow[]): string {
   const entries = buildInventoryExport(rows);
   const inStock = entries.filter((entry) => entry.remaining > 0);
   const sold = entries.filter((entry) => entry.remaining === 0 && entry.purchased > 0);
-  const formatEntry = (entry: InventoryExportEntry) =>
-    `x${entry.remaining} ${entry.cardName}${entry.cardNumber ? ` ${entry.cardNumber}` : ""}`;
+  const formatSection = (section: InventoryExportEntry[]) => {
+    if (!section.length) return ["(none)"];
+    const labels = section.map((entry) =>
+      `${entry.cardName}${entry.cardNumber ? ` ${entry.cardNumber}` : ""}`
+    );
+    const stockColumn = Math.max(...labels.map((label) => label.length)) + 3;
+    return section.map((entry, index) =>
+      `${labels[index].padEnd(stockColumn)}x${entry.remaining}`
+    );
+  };
 
   return [
     "IN STOCK",
-    ...(inStock.length ? inStock.map(formatEntry) : ["(none)"]),
+    ...formatSection(inStock),
     "",
     "SOLD OUT",
-    ...(sold.length ? sold.map(formatEntry) : ["(none)"]),
+    ...formatSection(sold),
     "",
   ].join("\n");
 }

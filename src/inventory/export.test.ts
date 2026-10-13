@@ -35,7 +35,7 @@ test("aggregates lots by card name and number and separates remaining stock from
   ]);
   assert.equal(
     formatInventoryExport(rows),
-    "IN STOCK\nx6 Pikachu 56/162\n\nSOLD OUT\nx0 Charizard 4/102\n",
+    "IN STOCK\nPikachu 56/162   x6\n\nSOLD OUT\nCharizard 4/102   x0\n",
   );
 });
 
