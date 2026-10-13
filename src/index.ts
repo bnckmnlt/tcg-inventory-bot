@@ -1150,6 +1150,20 @@ client.once(Events.ClientReady, async (readyClient) => {
     const inventoryExportCommand = {
       name: "inventory-export",
       description: "Download a text file of in-stock and sold-out cards",
+      options: [
+        {
+          type: 3,
+          name: "from",
+          description: "Optional purchase date range start (YYYY-MM-DD)",
+          required: false,
+        },
+        {
+          type: 3,
+          name: "to",
+          description: "Optional purchase date range end (YYYY-MM-DD)",
+          required: false,
+        },
+      ],
     };
     if (existingInventoryExport) await existingInventoryExport.edit(inventoryExportCommand);
     else await readyClient.application.commands.create(inventoryExportCommand, guild.id);
@@ -1519,14 +1533,39 @@ client.on(Events.InteractionCreate, async (interaction) => {
       return;
     }
 
+    const from = interaction.options.getString("from")?.trim();
+    const to = interaction.options.getString("to")?.trim();
+    if (Boolean(from) !== Boolean(to)) {
+      await interaction.reply({
+        content: "Provide both **from** and **to** dates, or leave both blank to export all records.",
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
+    if (from && to && (!isIsoDate(from) || !isIsoDate(to))) {
+      await interaction.reply({
+        content: "Both dates must use **YYYY-MM-DD** format and contain valid calendar dates.",
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
+    if (from && to && from > to) {
+      await interaction.reply({
+        content: "The **from** date cannot be later than the **to** date.",
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
+
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
     try {
       const rows = process.env.GOOGLE_SHEETS_SYNC === "true" && !invoiceTestMode
         ? await readGoogleSheetInventoryRows()
         : readV2InventoryWorkbook(workbookPath).rows;
-      const content = formatInventoryExport(rows);
+      const content = formatInventoryExport(rows, from, to);
+      const rangeLabel = from && to ? ` for purchase dates ${from} to ${to}` : "";
       await interaction.editReply({
-        content: "Inventory export generated from the current inventory records.",
+        content: `Inventory export generated from the current inventory records${rangeLabel}.`,
         files: [{ attachment: Buffer.from(content, "utf8"), name: "inventory-export.txt" }],
       });
     } catch (error) {

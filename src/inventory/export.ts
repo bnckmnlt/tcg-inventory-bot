@@ -24,8 +24,15 @@ export function buildInventoryExport(rows: ParsedV2InventoryRow[]): InventoryExp
   );
 }
 
-export function formatInventoryExport(rows: ParsedV2InventoryRow[]): string {
-  const entries = buildInventoryExport(rows);
+export function formatInventoryExport(
+  rows: ParsedV2InventoryRow[],
+  from?: string,
+  to?: string,
+): string {
+  const filteredRows = from && to
+    ? rows.filter((row) => Boolean(row.purchaseDate && row.purchaseDate >= from && row.purchaseDate <= to))
+    : rows;
+  const entries = buildInventoryExport(filteredRows);
   const inStock = entries.filter((entry) => entry.remaining > 0);
   const sold = entries.filter((entry) => entry.remaining === 0 && entry.purchased > 0);
   const formatSection = (section: InventoryExportEntry[]) => {
@@ -35,7 +42,9 @@ export function formatInventoryExport(rows: ParsedV2InventoryRow[]): string {
     );
     const stockColumn = Math.max(...labels.map((label) => label.length)) + 3;
     return section.map((entry, index) =>
-      `${labels[index].padEnd(stockColumn)}x${entry.remaining}`
+      section === sold
+        ? labels[index]
+        : `${labels[index].padEnd(stockColumn)}x${entry.remaining}`
     );
   };
 

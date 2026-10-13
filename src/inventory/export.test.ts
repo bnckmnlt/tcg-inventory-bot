@@ -35,7 +35,19 @@ test("aggregates lots by card name and number and separates remaining stock from
   ]);
   assert.equal(
     formatInventoryExport(rows),
-    "IN STOCK\nPikachu 56/162   x6\n\nSOLD OUT\nCharizard 4/102   x0\n",
+    "IN STOCK\nPikachu 56/162   x6\n\nSOLD OUT\nCharizard 4/102\n",
+  );
+});
+
+test("filters by inclusive purchase date range and omits quantities from sold-out cards", () => {
+  const rows = [
+    row({ cardName: "Pikachu", purchaseDate: "2026-01-01", remainingQty: 2, qtyPurchased: 3 }),
+    row({ cardName: "Gengar", cardNumber: "1/99", purchaseDate: "2026-01-10", remainingQty: 0, qtyPurchased: 1 }),
+    row({ cardName: "Mew", cardNumber: "2/99", purchaseDate: "2026-02-01", remainingQty: 1, qtyPurchased: 1 }),
+  ];
+  assert.equal(
+    formatInventoryExport(rows, "2026-01-01", "2026-01-31"),
+    "IN STOCK\nPikachu 56/162   x2\n\nSOLD OUT\nGengar 1/99\n",
   );
 });
 
