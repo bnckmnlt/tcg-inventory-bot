@@ -67,23 +67,30 @@ export function formatInventoryExport(
   const formatSection = (section: InventoryExportEntry[], includeQuantity: boolean) => {
     if (!section.length) return ["(none)"];
 
-    const entries = section.map((entry) => {
-      const label = `${entry.cardName}${entry.cardNumber ? ` ${entry.cardNumber}` : ""}`;
-      return includeQuantity ? `${label}  x${entry.remaining}` : label;
-    });
+    const items = section.map((entry) => ({
+      label: `${entry.cardName}${entry.cardNumber ? ` ${entry.cardNumber}` : ""}`,
+      quantity: entry.remaining,
+    }));
 
-    // Fill down the left column, then the right. Calculate a shared width from
-    // the longest entry so long card names cannot push the next column out of alignment.
-    const splitAt = Math.ceil(entries.length / 2);
-    const left = entries.slice(0, splitAt);
-    const right = entries.slice(splitAt);
-    const columnWidth = Math.max(0, ...left.map((entry) => entry.length)) + 3;
+    // Fill down the left column, then the right. Pad labels and quantities
+    // independently so the xN values stay vertically aligned in both columns.
+    const splitAt = Math.ceil(items.length / 2);
+    const left = items.slice(0, splitAt);
+    const right = items.slice(splitAt);
+    const leftLabelWidth = Math.max(0, ...left.map((entry) => entry.label.length));
+    const rightLabelWidth = Math.max(0, ...right.map((entry) => entry.label.length));
+    const formatEntry = (entry: typeof items[number], labelWidth: number) =>
+      includeQuantity ? `${entry.label.padEnd(labelWidth + 2)}x${entry.quantity}` : entry.label;
+    const leftWidth = includeQuantity ? leftLabelWidth + 2 + Math.max(0, ...left.map((entry) => String(entry.quantity).length)) + 1 : leftLabelWidth;
     const rowCount = Math.max(left.length, right.length);
 
     return Array.from({ length: rowCount }, (_, index) => {
-      const leftEntry = left[index] ?? "";
-      const rightEntry = right[index] ?? "";
-      return rightEntry ? `${leftEntry.padEnd(columnWidth)}${rightEntry}`.trimEnd() : leftEntry;
+      const leftEntry = left[index];
+      const rightEntry = right[index];
+      if (!rightEntry) return leftEntry ? formatEntry(leftEntry, leftLabelWidth) : "";
+      const formattedLeft = formatEntry(leftEntry, leftLabelWidth);
+      const formattedRight = formatEntry(rightEntry, rightLabelWidth);
+      return `${formattedLeft.padEnd(leftWidth + 3)}${formattedRight}`.trimEnd();
     });
   };
 

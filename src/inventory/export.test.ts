@@ -78,7 +78,7 @@ test("formats inventory sections in two aligned columns without long names shift
 
   assert.equal(
     formatInventoryExport(rows),
-    "IN STOCK\nA very long card name that needs room 1/99  x2   Charmander 3/99  x1\nBulbasaur 2/99  x4\n\nSOLD OUT\nDitto 4/99   Farfetch'd 6/99\nEevee 5/99\n",
+    "IN STOCK\nA very long card name that needs room 1/99  x2   Charmander 3/99  x1\nBulbasaur 2/99                              x4\n\nSOLD OUT\nDitto 4/99   Farfetch'd 6/99\nEevee 5/99\n",
   );
 });
 
