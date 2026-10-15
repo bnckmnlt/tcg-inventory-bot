@@ -284,6 +284,67 @@ async function findSaleForManagement(saleId: string): Promise<SaleManagementReco
   return findLocalSale(workbookPath!, saleId);
 }
 
+async function listSalesForManagement(): Promise<SaleManagementRecord[]> {
+  if (useGoogleSheets) {
+    const sales = await readGoogleSheetSalesLog();
+    return sales.filter((sale) => sale.saleId).map((sale) => ({
+      saleId: sale.saleId!, inventoryId: sale.inventoryId, cardName: sale.cardName,
+      setSeries: sale.setSeries, cardNumber: sale.cardNumber, rarity: sale.rarity,
+      condition: sale.condition, language: sale.language, variantPrinting: sale.variantPrinting,
+      dateSold: sale.dateSold, qtySold: sale.qtySold,
+      sellPrice: sale.sellPrice ?? (sale.qtySold > 0 ? sale.revenue / sale.qtySold : 0),
+      revenue: sale.revenue, cost: sale.cost, profit: sale.profit, notes: sale.notes,
+      voided: sale.qtySold === 0,
+    }));
+  }
+  const rows = readV2WorkbookSheet(workbookPath!, "Sales Log");
+  const header = rows.findIndex((row) => String(row[0] ?? "").trim().toLowerCase() === "sale id");
+  if (header < 0) return [];
+  return rows.slice(header + 1).filter((row) => String(row[0] ?? "").trim()).map((row) => {
+    const notes = String(row[16] ?? "").trim() || undefined;
+    const qtySold = Number(String(row[11] ?? "").replace(/[,₱]/g, "")) || 0;
+    const sellPrice = Number(String(row[12] ?? "").replace(/[,₱]/g, "")) || 0;
+    return {
+      saleId: String(row[0]).trim(), inventoryId: String(row[2] ?? "").trim(),
+      cardName: String(row[3] ?? "").trim(), setSeries: String(row[4] ?? "").trim(),
+      cardNumber: String(row[5] ?? "").trim(), rarity: String(row[6] ?? "").trim() || undefined,
+      condition: String(row[7] ?? "").trim(), language: String(row[8] ?? "").trim(),
+      variantPrinting: String(row[9] ?? "").trim() || "Normal", dateSold: localExcelDate(row[10]),
+      qtySold, sellPrice, revenue: Number(String(row[13] ?? "").replace(/[,₱]/g, "")) || qtySold * sellPrice,
+      cost: Number(String(row[14] ?? "").replace(/[,₱]/g, "")) || 0,
+      profit: Number(String(row[15] ?? "").replace(/[,₱]/g, "")) || 0,
+      notes, voided: qtySold === 0 || Boolean(notes?.includes("[VOIDED]")),
+    };
+  });
+}
+
+function saleManageListView(records: SaleManagementRecord[], requestedPage: number) {
+  const sorted = [...records].sort((a, b) => (b.dateSold ?? "").localeCompare(a.dateSold ?? "") || b.saleId.localeCompare(a.saleId));
+  const pageCount = Math.max(1, Math.ceil(sorted.length / 25));
+  const page = Math.max(0, Math.min(requestedPage, pageCount - 1));
+  const menu = new StringSelectMenuBuilder().setCustomId("sale-manage:select").setPlaceholder("Select a sale to manage")
+    .addOptions(sorted.slice(page * 25, page * 25 + 25).map((record) => new StringSelectMenuOptionBuilder()
+      .setValue(record.saleId)
+      .setLabel((record.cardName + " - " + record.cardNumber).slice(0, 100))
+      .setDescription((record.saleId + " | " + (record.dateSold ?? "No date") + " | x" + record.qtySold + " @ ₱" + record.sellPrice + (record.voided ? " | VOIDED" : "")).slice(0, 100))));
+  const components: Array<ActionRowBuilder<StringSelectMenuBuilder> | ActionRowBuilder<ButtonBuilder>> = [
+    new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(menu),
+  ];
+  if (pageCount > 1) components.push(new ActionRowBuilder<ButtonBuilder>().addComponents(
+    new ButtonBuilder().setCustomId("sale-manage:page:" + (page - 1)).setLabel("Previous").setStyle(ButtonStyle.Secondary).setDisabled(page === 0),
+    new ButtonBuilder().setCustomId("sale-manage:page:" + (page + 1)).setLabel("Next").setStyle(ButtonStyle.Secondary).setDisabled(page === pageCount - 1),
+  ));
+  return { content: "Select a sale (" + sorted.length + " total, page " + (page + 1) + "/" + pageCount + ").", components };
+}
+
+function saleManageRecordButtons(record: SaleManagementRecord) {
+  return new ActionRowBuilder<ButtonBuilder>().addComponents(
+    new ButtonBuilder().setCustomId("sale-manage:edit:" + record.saleId).setLabel("Edit Sale").setStyle(ButtonStyle.Primary).setDisabled(record.voided),
+    new ButtonBuilder().setCustomId("sale-manage:rollback:" + record.saleId).setLabel("Rollback Sale").setStyle(ButtonStyle.Danger).setDisabled(record.voided),
+    new ButtonBuilder().setCustomId("sale-manage:list").setLabel("Back to Sales").setStyle(ButtonStyle.Secondary),
+  );
+}
+
 function buildSaleManageEditModal(record: SaleManagementRecord): ModalBuilder {
   return new ModalBuilder()
     .setCustomId("sale-manage:edit:" + record.saleId)
@@ -1180,7 +1241,7 @@ client.once(Events.ClientReady, async (readyClient) => {
     const saleManageCommand = {
       name: "sale-manage",
       description: "View, edit, or rollback a recorded sale",
-      options: [{ type: 3, name: "sale_id", description: "Sale ID, e.g. SALE-000001", required: true }],
+      options: [],
     };
     if (existingSaleManage) await existingSaleManage.edit(saleManageCommand);
     else await readyClient.application.commands.create(saleManageCommand, guild.id);
@@ -1767,25 +1828,35 @@ client.on(Events.InteractionCreate, async (interaction) => {
   }
 
   if (interaction.isChatInputCommand() && interaction.commandName === "sale-manage") {
-    const saleId = interaction.options.getString("sale_id", true).trim().toUpperCase();
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
     try {
-      const record = await findSaleForManagement(saleId);
-      if (!record) {
-        await interaction.reply({ content: "Sale **" + saleId + "** was not found.", flags: MessageFlags.Ephemeral });
-      } else {
-        const buttons = new ActionRowBuilder<ButtonBuilder>().addComponents(
-          new ButtonBuilder().setCustomId("sale-manage:edit:" + saleId).setLabel("Edit Sale").setStyle(ButtonStyle.Primary).setDisabled(record.voided),
-          new ButtonBuilder().setCustomId("sale-manage:rollback:" + saleId).setLabel("Rollback Sale").setStyle(ButtonStyle.Danger).setDisabled(record.voided),
-        );
-        await interaction.reply({
-          embeds: [saleManagementEmbed(record)],
-          components: [buttons],
-          flags: MessageFlags.Ephemeral,
-        });
-      }
+      const sales = await listSalesForManagement();
+      await interaction.editReply(sales.length ? saleManageListView(sales, 0) : { content: "No sales found." });
     } catch (error) {
-      console.error("Failed to load sale for management:", error);
-      await interaction.reply({ content: "I couldn't load that sale. " + (error instanceof Error ? error.message : "Check the bot logs."), flags: MessageFlags.Ephemeral });
+      await interaction.editReply({ content: "Could not load sales: " + (error instanceof Error ? error.message : "Unknown error") });
+    }
+    return;
+  }
+
+  if (interaction.isButton() && (interaction.customId === "sale-manage:list" || interaction.customId.startsWith("sale-manage:page:"))) {
+    await interaction.deferUpdate();
+    try {
+      const sales = await listSalesForManagement();
+      const page = interaction.customId === "sale-manage:list" ? 0 : Number(interaction.customId.slice("sale-manage:page:".length));
+      await interaction.editReply(sales.length ? { ...saleManageListView(sales, Number.isFinite(page) ? page : 0), embeds: [] } : { content: "No sales found.", embeds: [], components: [] });
+    } catch (error) {
+      await interaction.editReply({ content: "Could not load sales: " + (error instanceof Error ? error.message : "Unknown error"), embeds: [], components: [] });
+    }
+    return;
+  }
+
+  if (interaction.isStringSelectMenu() && interaction.customId === "sale-manage:select") {
+    await interaction.deferUpdate();
+    try {
+      const record = await findSaleForManagement(interaction.values[0]);
+      await interaction.editReply(record ? { content: "", embeds: [saleManagementEmbed(record)], components: [saleManageRecordButtons(record)] } : { content: "Sale not found. Run /sale-manage again.", embeds: [], components: [] });
+    } catch (error) {
+      await interaction.editReply({ content: "Could not load sale: " + (error instanceof Error ? error.message : "Unknown error"), embeds: [], components: [] });
     }
     return;
   }

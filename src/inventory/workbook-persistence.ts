@@ -335,6 +335,7 @@ function updateInventoryFormulaCaches(
   sheetXml: string,
   inventory: ReturnType<typeof readV2InventoryWorkbook>,
   allocations: Array<{ inventoryId: string; qty: number }>,
+  sellPrice: number,
 ): string {
   const lotsById = new Map(inventory.rows.map((row) => [row.inventoryId, row]));
   const allocatedByLot = new Map<string, number>();
@@ -353,8 +354,15 @@ function updateInventoryFormulaCaches(
     const remaining = Math.max(0, lot.remainingQty - saleQty);
     const qtySold = Math.max(0, lot.qtyPurchased - remaining);
     const status = remaining === 0 ? "Sold Out" : remaining < lot.qtyPurchased ? "Partially Sold" : "In Stock";
+    const priorRevenue = Number(String(lot.raw["total revenue (₱)"] ?? 0).replace(/[₱,]/g, "")) || 0;
+    const priorCostSold = Number(String(lot.raw["cost sold (fifo)"] ?? 0).replace(/[₱,]/g, "")) || 0;
+    const totalRevenue = priorRevenue + saleQty * sellPrice;
+    const costSold = priorCostSold + saleQty * lot.unitCost;
     xml = setFormulaCachedValue(xml, "R" + lot.sourceRow, qtySold);
     xml = setFormulaCachedValue(xml, "S" + lot.sourceRow, remaining);
+    xml = setFormulaCachedValue(xml, "T" + lot.sourceRow, totalRevenue);
+    xml = setFormulaCachedValue(xml, "U" + lot.sourceRow, costSold);
+    xml = setFormulaCachedValue(xml, "V" + lot.sourceRow, totalRevenue - costSold);
     xml = setFormulaCachedValue(xml, "W" + lot.sourceRow, status);
   }
 
@@ -400,6 +408,26 @@ export function persistSaleToWorkbook(workbookPath: string, input: LocalSalePers
     const allocationStyles = sheetTemplateStyles(allocationXml, 4, ["A","B","C","D","E","F","G","H","I","J","K","L"]);
     const inventory = readV2InventoryWorkbook(workbookPath);
     const lotById = new Map(inventory.rows.map((row) => [row.inventoryId, row]));
+    const allocatedByLot = new Map<string, number>();
+    for (const allocation of input.allocations) {
+      if (!Number.isInteger(allocation.qty) || allocation.qty < 1) {
+        throw new Error("Each sale allocation must have a positive integer quantity.");
+      }
+      if (!lotById.has(allocation.inventoryId)) {
+        throw new Error("Inventory lot " + allocation.inventoryId + " no longer exists. Search again.");
+      }
+      allocatedByLot.set(allocation.inventoryId, (allocatedByLot.get(allocation.inventoryId) ?? 0) + allocation.qty);
+    }
+    const allocatedQty = [...allocatedByLot.values()].reduce((sum, qty) => sum + qty, 0);
+    if (allocatedQty !== input.qtySold) {
+      throw new Error("Sale quantity (" + input.qtySold + ") must match allocated quantity (" + allocatedQty + ").");
+    }
+    for (const [inventoryId, qty] of allocatedByLot) {
+      const lot = lotById.get(inventoryId)!;
+      if (qty > lot.remainingQty) {
+        throw new Error("Only " + lot.remainingQty + " unit(s) remain in inventory lot " + inventoryId + ". Search again.");
+      }
+    }
     const saleRow = findNextXmlRow(salesXml, 4);
     const allocationRow = findNextXmlRow(allocationXml, 4);
     const revenueFormula = "IF(A" + saleRow + "=\"\",\"\",L" + saleRow + "*M" + saleRow + ")";
@@ -453,16 +481,34 @@ export function persistSaleToWorkbook(workbookPath: string, input: LocalSalePers
     });
     appendRowsToSheetXml(allocationsPath, allocationRows, 4, "L");
 
-    invalidateFormulaCaches(unpacked);
+    // Preserve cached values in existing Sales Log, Cost Allocations, and Dashboard formulas.
+    // New formula cells need explicit cached values because the bot reads XLSX values directly.
+    let updatedSalesXml = readFileSync(salesPath, "utf8");
+    const saleRevenue = input.qtySold * input.sellPrice;
+    const saleCost = input.allocations.reduce((sum, allocation) => {
+      const lot = lotById.get(allocation.inventoryId);
+      if (!lot) throw new Error("Inventory lot " + allocation.inventoryId + " no longer exists.");
+      return sum + allocation.qty * lot.unitCost;
+    }, 0);
+    updatedSalesXml = setFormulaCachedValue(updatedSalesXml, "N" + saleRow, saleRevenue);
+    updatedSalesXml = setFormulaCachedValue(updatedSalesXml, "O" + saleRow, saleCost);
+    updatedSalesXml = setFormulaCachedValue(updatedSalesXml, "P" + saleRow, saleRevenue - saleCost);
+    updatedSalesXml = setFormulaCachedValue(updatedSalesXml, "R" + saleRow, input.allocations.reduce((sum, allocation) => sum + allocation.qty, 0) === input.qtySold ? "OK" : "PARTIAL");
+    writeFileSync(salesPath, updatedSalesXml);
 
-    // Restore the availability-related formula caches after invalidation.
-    // The bot reads XLSX values directly when building the Discord dropdown,
-    // while Excel/Google Sheets can still recalculate the formulas normally.
+    let updatedAllocationXml = readFileSync(allocationsPath, "utf8");
+    for (let index = 0; index < input.allocations.length; index += 1) {
+      updatedAllocationXml = setFormulaCachedValue(updatedAllocationXml, "L" + (allocationRow + index), "OK");
+    }
+    writeFileSync(allocationsPath, updatedAllocationXml);
+
+    // Keep availability caches current for Discord inventory selection.
     const inventoryPath = join(unpacked, "xl", "worksheets", "sheet3.xml");
     const updatedInventoryXml = updateInventoryFormulaCaches(
       readFileSync(inventoryPath, "utf8"),
       inventory,
       input.allocations,
+      input.sellPrice,
     );
     writeFileSync(inventoryPath, updatedInventoryXml);
     const output = workbookPath + ".tmp-" + process.pid + "-" + Date.now();
@@ -676,7 +722,6 @@ export function appendInventoryRowsToWorkbook(
   zip.extractAllTo(unpacked, true);
   try {
     updateInventorySheet(unpacked, rows, options);
-    invalidateFormulaCaches(unpacked);
     updateWorkbookDefinedNames(unpacked, rows.length);
     packDirectory(unpacked, outputWorkbookPath);
   } finally {

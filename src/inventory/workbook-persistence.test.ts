@@ -8,7 +8,7 @@ import type { InvoiceData } from "../extract.js";
 import { appendInventoryRowsToWorkbook, invoicePlanToWorkbookRows, persistSaleToWorkbook, readWorkbookIds } from "./workbook-persistence.js";
 import type { IngestionPlan } from "./ingest.js";
 import type { V2InventoryRow } from "./types.js";
-import { readV2InventoryWorkbook } from "./read-xlsx.js";
+import { readV2InventoryWorkbook, readV2WorkbookSheet } from "./read-xlsx.js";
 
 function workbookRow(overrides: Partial<V2InventoryRow> = {}): V2InventoryRow {
   return {
@@ -35,9 +35,26 @@ function inventorySheetXml(path: string): string {
   return new AdmZip(path).readAsText("xl/worksheets/sheet3.xml");
 }
 
-test("reads Sale and Allocation IDs after local sale persistence", () => {
+function cleanStarterWorkbook(root: string): string {
   const source = join(process.cwd(), "clean-inventory.xlsx");
+  const output = join(root, "clean-starter.xlsx");
+  const zip = new AdmZip(source);
+  let inventoryXml = zip.readAsText("xl/worksheets/sheet3.xml");
+  inventoryXml = inventoryXml.replace(/<row\b[^>]*\br="(\d+)"[^>]*>[\s\S]*?<\/row>/g, (rowXml, rowNumberText: string) => {
+    const rowNumber = Number(rowNumberText);
+    if (rowNumber < 4) return rowXml;
+    const hasInventoryId = new RegExp(`<c\\b[^>]*\\br="A${rowNumber}"[^>]*>([\\s\\S]*?)</c>`).test(rowXml)
+      && !new RegExp(`<c\\b[^>]*\\br="A${rowNumber}"[^>]*/>`).test(rowXml);
+    return hasInventoryId ? "" : rowXml;
+  });
+  zip.updateFile("xl/worksheets/sheet3.xml", Buffer.from(inventoryXml));
+  zip.writeZip(output);
+  return output;
+}
+
+test("reads Sale and Allocation IDs after local sale persistence", () => {
   withTempRoot((root) => {
+    const source = cleanStarterWorkbook(root);
     const workbook = join(root, "inventory.xlsx");
     appendInventoryRowsToWorkbook(source, workbook, [workbookRow()], { unitCostRate: 1 });
     persistSaleToWorkbook(workbook, {
@@ -140,7 +157,7 @@ function plan(inputOverrides: Partial<IngestionPlan["rows"][number]["input"]>): 
   };
 }
 
-test("inserts the first card into row 4 of a clean starter workbook and preserves formatting", () => {
+test("appends an inventory row to the sample workbook and preserves formatting", () => {
   const source = join(process.cwd(), "clean-inventory.xlsx");
   withTempRoot((root) => {
     const output = join(root, "clean-with-card.xlsx");
@@ -150,16 +167,16 @@ test("inserts the first card into row 4 of a clean starter workbook and preserve
 
     const result = readV2InventoryWorkbook(output);
     assert.equal(result.issues.length, 0);
-    assert.equal(result.rows.length, 1);
-    assert.equal(result.rows[0].sourceRow, 4);
-    assert.equal(result.rows[0].inventoryId, "IMG-ORDER-1-001");
+    assert.equal(result.rows.length, 12);
+    assert.equal(result.rows.at(-1)?.sourceRow, 15);
+    assert.equal(result.rows.at(-1)?.inventoryId, "IMG-ORDER-1-001");
 
     const outputXml = inventorySheetXml(output);
     assert.equal(rowXml(outputXml, 1), rowXml(sourceXml, 1));
     assert.equal(rowXml(outputXml, 2), rowXml(sourceXml, 2));
     assert.equal(rowXml(outputXml, 3), rowXml(sourceXml, 3));
-    assert.deepEqual(styleMap(outputXml, 4), styleMap(sourceXml, 49));
-    assert.deepEqual(styleMap(outputXml, 5), styleMap(sourceXml, 5));
+    assert.deepEqual(styleMap(outputXml, 15), styleMap(sourceXml, 49));
+    assert.deepEqual(styleMap(outputXml, 16), styleMap(sourceXml, 16));
 
     const sourceDashboardXml = dashboardSheetXml(source);
     const sourceDashboardA6 = sourceDashboardXml.match(/<c r="A6"[^>]*>/)?.[0];
@@ -171,7 +188,7 @@ test("inserts the first card into row 4 of a clean starter workbook and preserve
   });
 });
 
-test("appends after the last actual card instead of resetting to row 4", () => {
+test("appends after the last actual card in a populated sample workbook", () => {
   const source = join(process.cwd(), "clean-inventory.xlsx");
   withTempRoot((root) => {
     const firstOutput = join(root, "first.xlsx");
@@ -184,15 +201,15 @@ test("appends after the last actual card instead of resetting to row 4", () => {
 
     const result = readV2InventoryWorkbook(secondOutput);
     assert.equal(result.issues.length, 0);
-    assert.deepEqual(result.rows.map((row) => [row.sourceRow, row.inventoryId]), [
-      [4, "IMG-ORDER-1-001"],
-      [5, "IMG-ORDER-1-002"],
+    assert.deepEqual(result.rows.slice(-2).map((row) => [row.sourceRow, row.inventoryId]), [
+      [15, "IMG-ORDER-1-001"],
+      [16, "IMG-ORDER-1-002"],
     ]);
 
     const xml = inventorySheetXml(secondOutput);
-    assert.match(rowXml(xml, 4), /r="A4"[^>]*>.*IMG-ORDER-1-001/s);
-    assert.match(rowXml(xml, 5), /r="A5"[^>]*>.*IMG-ORDER-1-002/s);
-    assert.deepEqual(styleMap(xml, 5), styleMap(inventorySheetXml(source), 49));
+    assert.match(rowXml(xml, 15), /r="A15"[^>]*>.*IMG-ORDER-1-001/s);
+    assert.match(rowXml(xml, 16), /r="A16"[^>]*>.*IMG-ORDER-1-002/s);
+    assert.deepEqual(styleMap(xml, 16), styleMap(inventorySheetXml(source), 49));
   });
 });
 
@@ -227,10 +244,77 @@ test("preserves sold-out inventory caches across sequential sales", () => {
 
     const result = readV2InventoryWorkbook(workbook);
     assert.equal(result.issues.length, 0);
-    assert.deepEqual(result.rows.map((row) => [row.inventoryId, row.remainingQty]), [
+    assert.deepEqual(result.rows.filter((row) => row.inventoryId.startsWith("IMG-ORDER-1-00")).map((row) => [row.inventoryId, row.remainingQty]), [
       ["IMG-ORDER-1-001", 0],
       ["IMG-ORDER-1-002", 0],
     ]);
+  });
+});
+
+test("rejects sales when allocated quantity does not match the sale quantity", () => {
+  const source = join(process.cwd(), "clean-inventory.xlsx");
+  withTempRoot((root) => {
+    const workbook = join(root, "inventory.xlsx");
+    appendInventoryRowsToWorkbook(source, workbook, [workbookRow()], { unitCostRate: 1 });
+    assert.throws(() => persistSaleToWorkbook(workbook, {
+      saleId: "SALE-000001",
+      cardKey: "PIKACHU|TEST SET|001|COMMON|NEAR MINT|ENGLISH|NORMAL",
+      inventoryId: "IMG-ORDER-1-001",
+      cardName: "Pikachu",
+      setSeries: "Test Set",
+      cardNumber: "001",
+      rarity: "Common",
+      condition: "Near Mint",
+      language: "English",
+      variantPrinting: "Normal",
+      dateSold: "2026-10-01",
+      qtySold: 2,
+      sellPrice: 150,
+      allocations: [{ allocationId: "ALLOC-000001", inventoryId: "IMG-ORDER-1-001", qty: 1 }],
+    }), /must match allocated quantity/);
+    assert.deepEqual(readWorkbookIds(workbook, 4, "SALE"), []);
+  });
+});
+
+test("keeps sale revenue, cost, and profit readable across different sale prices", () => {
+  const source = join(process.cwd(), "clean-inventory.xlsx");
+  withTempRoot((root) => {
+    const workbook = join(root, "inventory.xlsx");
+    appendInventoryRowsToWorkbook(source, workbook, [workbookRow()], { unitCostRate: 1 });
+    const base = {
+      cardKey: "PIKACHU|TEST SET|001|COMMON|NEAR MINT|ENGLISH|NORMAL",
+      inventoryId: "IMG-ORDER-1-001",
+      cardName: "Pikachu",
+      setSeries: "Test Set",
+      cardNumber: "001",
+      rarity: "Common",
+      condition: "Near Mint",
+      language: "English",
+      variantPrinting: "Normal",
+      dateSold: "2026-10-01",
+      qtySold: 1,
+      allocations: [{ allocationId: "ALLOC-000001", inventoryId: "IMG-ORDER-1-001", qty: 1 }],
+    };
+    persistSaleToWorkbook(workbook, { ...base, saleId: "SALE-000001", sellPrice: 150 });
+    persistSaleToWorkbook(workbook, { ...base, saleId: "SALE-000002", sellPrice: 300, allocations: [{ allocationId: "ALLOC-000002", inventoryId: "IMG-ORDER-1-001", qty: 1 }] });
+
+    const sales = readV2WorkbookSheet(workbook, "Sales Log");
+    const first = sales.find((row) => row[0] === "SALE-000001");
+    const second = sales.find((row) => row[0] === "SALE-000002");
+    assert.ok(first);
+    assert.ok(second);
+    assert.equal(first[13], 150);
+    assert.equal(first[14], 1.25);
+    assert.equal(first[15], 148.75);
+    assert.equal(second[13], 300);
+    assert.equal(second[14], 1.25);
+    assert.equal(second[15], 298.75);
+
+    const inventory = readV2InventoryWorkbook(workbook).rows.find((row) => row.inventoryId === "IMG-ORDER-1-001");
+    assert.equal(inventory?.remainingQty, 0);
+    assert.equal(inventory?.raw["total revenue (₱)"], 450);
+    assert.equal(inventory?.raw["cost sold (fifo)"], 2.5);
+    assert.equal(inventory?.raw["realized profit / loss (₱)"], 447.5);
   });
 });
 
