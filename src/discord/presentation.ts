@@ -1,6 +1,7 @@
 import { EmbedBuilder } from "discord.js";
 import type { ParsedV2InventoryRow } from "../inventory/v2-workbook.js";
 import type { BriefingSaleRecord } from "../inventory/briefing.js";
+import type { SalesTotal } from "../inventory/sales-total.js";
 import { getInventoryAlerts } from "../inventory/alerts.js";
 
 const PHOSPHOR_ICON_BASE = "https://cdn.jsdelivr.net/npm/@phosphor-icons/core@2.1.1/assets/regular";
@@ -184,6 +185,27 @@ export function saleManagementEmbed(record: {
     )
     .setFooter({ text: record.voided ? "This sale is voided. Its inventory allocation has been restored." : "Edit changes price/date/notes. Rollback voids the sale and restores its inventory allocation." }),
     DISCORD_ICONS.receipt);
+}
+
+export function salesTotalEmbed(total: SalesTotal, from?: string, to?: string): EmbedBuilder {
+  const range = from && to ? `${from} to ${to} (inclusive)` : "All recorded sales";
+  const money = (value: number) => "₱" + value.toLocaleString("en-PH", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+  return withIcon(new EmbedBuilder()
+    .setColor(DISCORD_COLORS.sales)
+    .setTitle("Sales Total")
+    .setDescription(`**Sale dates:** ${range}`)
+    .addFields(
+      { name: "Total Sales / Revenue", value: `**${money(total.revenue)}**`, inline: false },
+      { name: "Transactions", value: String(total.transactions), inline: true },
+      { name: "Cards Sold", value: String(total.cardsSold), inline: true },
+      { name: "Cost of Goods Sold", value: money(total.cost), inline: true },
+      { name: "Realized Profit / Loss", value: money(total.profit), inline: true },
+    )
+    .setFooter({ text: from && to
+      ? "Based on non-voided Sales Log entries with sale dates in this range."
+      : "Based on non-voided Sales Log entries, including undated sales." }),
+    DISCORD_ICONS.coins);
 }
 
 export function salePreparationErrorEmbed(message: string): EmbedBuilder {

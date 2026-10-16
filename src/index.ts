@@ -56,6 +56,7 @@ import {
 } from "./transaction.js";
 import { buildSaleCardKey, buildSelectedLotSalePlan, type SaleDraft } from "./inventory/sales.js";
 import { validateSaleEdit, type SaleManagementRecord } from "./inventory/sale-management.js";
+import { calculateSalesTotal, formatSalesTotalExport } from "./inventory/sales-total.js";
 import { searchInventory } from "./inventory/search.js";
 import { findInventoryAvailability, type InventoryAvailabilitySale } from "./inventory/availability.js";
 import { countInventoryAlerts, getInventoryAlerts } from "./inventory/alerts.js";
@@ -71,6 +72,7 @@ import {
   saleSearchResultsEmbed,
   saleSearchEmptyEmbed,
   saleReviewEmbed,
+  salesTotalEmbed,
   selectedInventoryEmbed,
   salePreparationErrorEmbed,
   saleManagementEmbed,
@@ -294,7 +296,7 @@ async function listSalesForManagement(): Promise<SaleManagementRecord[]> {
       dateSold: sale.dateSold, qtySold: sale.qtySold,
       sellPrice: sale.sellPrice ?? (sale.qtySold > 0 ? sale.revenue / sale.qtySold : 0),
       revenue: sale.revenue, cost: sale.cost, profit: sale.profit, notes: sale.notes,
-      voided: sale.qtySold === 0,
+      voided: sale.qtySold === 0 || Boolean(sale.notes?.includes("[VOIDED]")),
     }));
   }
   const rows = readV2WorkbookSheet(workbookPath!, "Sales Log");
@@ -406,7 +408,9 @@ function formatMoney(amount: number | null, currency: string | null): string {
 }
 
 function isIsoDate(value: string): boolean {
-  return /^\d{4}-\d{2}-\d{2}$/.test(value) && !Number.isNaN(Date.parse(value + "T00:00:00Z"));
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const timestamp = Date.parse(value + "T00:00:00Z");
+  return Number.isFinite(timestamp) && new Date(timestamp).toISOString().slice(0, 10) === value;
 }
 
 function statusLabel(plan: IngestionPlan): string {
@@ -1229,6 +1233,18 @@ client.once(Events.ClientReady, async (readyClient) => {
     if (existingInventoryExport) await existingInventoryExport.edit(inventoryExportCommand);
     else await readyClient.application.commands.create(inventoryExportCommand, guild.id);
 
+    const existingSalesTotal = commands.find((command) => command.name === "sales-total");
+    const salesTotalCommand = {
+      name: "sales-total",
+      description: "Show total sales revenue and profit for an optional sale-date range",
+      options: [
+        { type: 3, name: "from", description: "Optional sale date range start (YYYY-MM-DD)", required: false },
+        { type: 3, name: "to", description: "Optional sale date range end (YYYY-MM-DD)", required: false },
+      ],
+    };
+    if (existingSalesTotal) await existingSalesTotal.edit(salesTotalCommand);
+    else await readyClient.application.commands.create(salesTotalCommand, guild.id);
+
     const existingSale = commands.find((command) => command.name === "sale");
     const saleCommand = {
       name: "sale",
@@ -1632,6 +1648,42 @@ client.on(Events.InteractionCreate, async (interaction) => {
     } catch (error) {
       console.error("Failed to export inventory:", error);
       await interaction.editReply({ content: "I couldn't generate the inventory export right now." });
+    }
+    return;
+  }
+
+  if (interaction.isChatInputCommand() && interaction.commandName === "sales-total") {
+    if (!useGoogleSheets && !workbookPath) {
+      await interaction.reply({ content: "Sales totals are not configured because INVENTORY_WORKBOOK_PATH is missing.", flags: MessageFlags.Ephemeral });
+      return;
+    }
+
+    const from = interaction.options.getString("from")?.trim();
+    const to = interaction.options.getString("to")?.trim();
+    if (Boolean(from) !== Boolean(to)) {
+      await interaction.reply({ content: "Provide both **from** and **to** dates, or leave both blank for all sales.", flags: MessageFlags.Ephemeral });
+      return;
+    }
+    if (from && to && (!isIsoDate(from) || !isIsoDate(to))) {
+      await interaction.reply({ content: "Both dates must use **YYYY-MM-DD** format and contain valid calendar dates.", flags: MessageFlags.Ephemeral });
+      return;
+    }
+    if (from && to && from > to) {
+      await interaction.reply({ content: "The **from** date cannot be later than the **to** date.", flags: MessageFlags.Ephemeral });
+      return;
+    }
+
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    try {
+      const sales = await listSalesForManagement();
+      const total = calculateSalesTotal(sales, from, to);
+      await interaction.editReply({
+        embeds: [salesTotalEmbed(total, from, to)],
+        files: [{ attachment: Buffer.from(formatSalesTotalExport(sales, from, to), "utf8"), name: "sales-total.txt" }],
+      });
+    } catch (error) {
+      console.error("Failed to calculate sales total:", error);
+      await interaction.editReply({ content: "I couldn't calculate the sales total right now." });
     }
     return;
   }
